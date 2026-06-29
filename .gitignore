@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+*.pyo
+*.swp
+.DS_Store
+
+# profiler outputs
+vtune_results/
+unitrace_results/
+pt_profile_results/
+*.vtune
+*.json
+*.log
+warmup.log
+bench.log
