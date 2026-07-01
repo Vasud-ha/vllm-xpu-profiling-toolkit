@@ -12,6 +12,8 @@ All three share the same **ROI-gated collection pattern**: instead of profiling 
 
 For a **side-by-side comparison** of what each profiler sees, when to reach for each, and how to combine them, see [`profiler_comparison.txt`](./profiler_comparison.txt) — GitHub renders it in-browser.
 
+For the **raw tool invocations** (skipping the wrapper scripts entirely — useful when you want to graft profiling into your own benchmark harness), see [`direct_invocation.txt`](./direct_invocation.txt).
+
 ## Layout
 
 Each profiler folder follows the same shape:

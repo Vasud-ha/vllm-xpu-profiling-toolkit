@@ -1,0 +1,147 @@
+================================================================================
+  Direct invocation - skipping the wrapper scripts
+================================================================================
+
+The three run_*_vllm.sh wrappers add ROI gating, preflight checks, CSV report
+generation, and cleanup traps on top of the raw profiler recipes. If you want
+to see the underlying tool invocation or graft it into your own benchmark
+harness, use the commands below.
+
+All three assume:
+- vLLM is on PATH (`vllm --version`).
+- oneAPI is sourced (`source /opt/intel/oneapi/setvars.sh --force`).
+- --enforce-eager is set (required on intel/vllm-xpu; see the feedback notes
+  in each SKILL.md).
+
+Replace <MODEL>, <PORT>, <HOST>, <DTYPE>, <MAX_MODEL_LEN>, <GPU_MEM_UTIL>,
+<INPUT_LEN>, <OUTPUT_LEN>, <NUM_PROMPTS>, <MAX_CONCURRENCY>, <DATASET>, and
+<RESULT_DIR> with your values.
+
+
+1. unitrace - Level Zero + SYCL + oneCCL + oneDNN + kernel trace
+================================================================
+
+Shell 1 (launcher):
+
+  UT=<path-to>/pti-gpu/tools/unitrace/build/unitrace
+
+  $UT \
+    --chrome-kernel-logging --chrome-sycl-logging --chrome-ccl-logging \
+    --chrome-dnn-logging --chrome-call-logging --chrome-device-logging \
+    --verbose \
+    --output-dir-path <RESULT_DIR> \
+    python -m vllm.entrypoints.openai.api_server \
+      --model <MODEL> \
+      --host <HOST> --port <PORT> \
+      --dtype <DTYPE> --max-model-len <MAX_MODEL_LEN> \
+      --gpu-memory-utilization <GPU_MEM_UTIL> --enforce-eager
+
+Shell 2 (driver):
+
+  vllm bench serve \
+    --backend openai \
+    --base-url http://<HOST>:<PORT> \
+    --model <MODEL> \
+    --dataset-name <DATASET> \
+    --random-input-len <INPUT_LEN> --random-output-len <OUTPUT_LEN> \
+    --num-prompts <NUM_PROMPTS> --max-concurrency <MAX_CONCURRENCY>
+
+When done, SIGINT the python process (NOT unitrace) so unitrace observes the
+child exit and dumps the Device Timing Summary + writes python.<pid>.json
+into <RESULT_DIR>. SIGINT'ing unitrace itself gives truncated traces.
+
+Notes:
+- unitrace uses --output-dir-path (NOT -result-dir; that's a VTune flag).
+- No --start-paused here: with no ITT-driven ROI in the server, /start_profile
+  endpoints don't exist, so we just trace the whole run. Keep NUM_PROMPTS small.
+
+
+2. VTune GPU-Hotspots - HW counter view
+=======================================
+
+Shell 1 (launcher):
+
+  vtune -collect gpu-hotspots \
+        -knob collect-programming-api=true \
+        -result-dir <RESULT_DIR> \
+        -- python -m vllm.entrypoints.openai.api_server \
+              --model <MODEL> \
+              --host <HOST> --port <PORT> \
+              --dtype <DTYPE> --max-model-len <MAX_MODEL_LEN> \
+              --gpu-memory-utilization <GPU_MEM_UTIL> \
+              --enforce-eager
+
+Shell 2 (driver):
+
+  vllm bench serve \
+    --backend openai --base-url http://<HOST>:<PORT> \
+    --model <MODEL> \
+    --dataset-name <DATASET> \
+    --random-input-len <INPUT_LEN> --random-output-len <OUTPUT_LEN> \
+    --num-prompts <NUM_PROMPTS> --max-concurrency <MAX_CONCURRENCY>
+
+Ctrl-C the launcher shell when the driver finishes. VTune finalizes
+<RESULT_DIR> on exit.
+
+Reports:
+
+  vtune -report summary      -r <RESULT_DIR> -format csv > summary.csv
+  vtune -report gpu-hotspots -r <RESULT_DIR> -group-by computing-task \
+                             -format csv -limit 25 > hotspots.csv
+
+Notes:
+- --disable-log-requests was REMOVED in vLLM >= 0.17. Do not pass it. If you
+  need to force-disable request logging, use --no-enable-log-requests.
+- On BMG/Xe2 (xe kernel driver) with VTune 2025.x, "Hottest GPU Computing
+  Tasks" often comes back empty. Prefer unitrace for BMG kernel attribution.
+- Prerequisites: apt install intel-oneapi-vtune intel-metrics-discovery,
+  then ln -sf libigdmd.so.1 /usr/lib/x86_64-linux-gnu/libigdmd.so && ldconfig
+  (see PREREQUISITES.md).
+
+
+3. PyTorch profiler - via vLLM's official gate
+==============================================
+
+vLLM's built-in torch profiler is the collector; you enable it via CLI arg
+(vLLM >= 0.17) or env var (<= 0.14), then trigger it with curl.
+
+Shell 1 (launcher, vLLM >= 0.17):
+
+  mkdir -p <RESULT_DIR>
+  vllm serve <MODEL> \
+    --host <HOST> --port <PORT> \
+    --dtype <DTYPE> --max-model-len <MAX_MODEL_LEN> \
+    --gpu-memory-utilization <GPU_MEM_UTIL> --enforce-eager \
+    --profiler-config '{"profiler":"torch","torch_profiler_dir":"<RESULT_DIR>","torch_profiler_use_gzip":true}'
+
+Shell 1 (launcher, vLLM <= 0.14):
+
+  export VLLM_TORCH_PROFILER_DIR=<RESULT_DIR>
+  mkdir -p "$VLLM_TORCH_PROFILER_DIR"
+  vllm serve <MODEL> \
+    --host <HOST> --port <PORT> --dtype <DTYPE> \
+    --max-model-len <MAX_MODEL_LEN> \
+    --gpu-memory-utilization <GPU_MEM_UTIL> --enforce-eager
+
+Shell 2 (driver, either version):
+
+  curl -X POST http://<HOST>:<PORT>/start_profile
+
+  vllm bench serve \
+    --backend openai --base-url http://<HOST>:<PORT> \
+    --model <MODEL> \
+    --dataset-name <DATASET> \
+    --random-input-len <INPUT_LEN> --random-output-len <OUTPUT_LEN> \
+    --num-prompts <NUM_PROMPTS> --max-concurrency <MAX_CONCURRENCY>
+
+  curl -X POST http://<HOST>:<PORT>/stop_profile   # flushes to disk
+
+Traces land as <RESULT_DIR>/*.pt.trace.json.gz. Open the largest one (rank-0)
+in https://ui.perfetto.dev.
+
+Notes:
+- Symptom that you forgot the profiler gate: /start_profile returns 404 and
+  the server log says "Unknown vLLM environment variable detected:
+  VLLM_TORCH_PROFILER_DIR". Restart with --profiler-config on 0.17+.
+- Trace files are large (10-50 MB even for a small ROI). torch_profiler_use_gzip
+  cuts that ~5x.
