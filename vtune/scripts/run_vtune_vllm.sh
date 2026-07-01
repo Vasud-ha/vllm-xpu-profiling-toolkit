@@ -311,29 +311,35 @@ trap - EXIT INT TERM
 kill "$VTUNE_PID" 2>/dev/null || true
 wait "$VTUNE_PID" 2>/dev/null || true
 
-# ---- Step 6: Headless reports (skill SKILL.md §11.1) ----
+# ---- Step 6: Headless reports ----
+# We emit only the three canonical CSVs (summary.csv, hotspots.csv, tasks.csv)
+# and route stderr to stdout so failures show inline rather than leaving stale
+# .err sidecar files behind. If a CSV comes back empty, we delete it — no
+# zero-byte files cluttering the result dir.
 echo
 echo "===== Headless reports ====="
-vtune -report summary -r "$RESULT_DIR" -format csv \
-      > "$RESULT_DIR/summary.csv" 2>"$RESULT_DIR/summary.err" \
-  && echo "  wrote summary.csv" \
-  || echo "  summary.csv FAILED (see summary.err)"
+_write_report() {
+  local name="$1" out="$2"; shift 2
+  if vtune "$@" -r "$RESULT_DIR" -format csv > "$out" 2>&1; then
+    if [[ -s "$out" ]]; then
+      echo "  wrote $name"
+    else
+      rm -f "$out"
+      echo "  $name empty — removed"
+    fi
+  else
+    echo "  $name FAILED:"
+    sed 's/^/    /' "$out" | head -5
+    rm -f "$out"
+  fi
+}
 
-# `gpu-hotspots` is the report name for gpu-hotspots collections (works on
-# 2024+). `hotspots` is for the CPU hotspots collection and would error here
-# on 2026.
-vtune -report gpu-hotspots -r "$RESULT_DIR" \
-      -group-by computing-task -format csv -limit 25 \
-      > "$RESULT_DIR/hotspots.csv" 2>"$RESULT_DIR/hotspots.err" \
-  && echo "  wrote hotspots.csv (top 25 by GPU Time)" \
-  || echo "  hotspots.csv FAILED (see hotspots.err)"
-
-# Top-tasks shows ITT task domains/labels. Renamed from `tasks` in VTune 2026.
-# Only meaningful if ITT tasks were emitted (window/per_step modes).
-vtune -report top-tasks -r "$RESULT_DIR" -format csv \
-      > "$RESULT_DIR/tasks.csv" 2>"$RESULT_DIR/tasks.err" \
-  && echo "  wrote tasks.csv" \
-  || echo "  tasks.csv FAILED (see tasks.err)"
+_write_report "summary.csv"  "$RESULT_DIR/summary.csv"  -report summary
+# `gpu-hotspots` is the correct report on 2024+; `hotspots` is CPU-only.
+_write_report "hotspots.csv" "$RESULT_DIR/hotspots.csv" \
+  -report gpu-hotspots -group-by computing-task -limit 25
+# ITT task domains/labels. `top-tasks` on 2026+, `tasks` on 2024.x/2025.x.
+_write_report "tasks.csv"    "$RESULT_DIR/tasks.csv"    -report top-tasks
 
 # ---- Step 7: Post-run verification (validation-and-flow.txt §E) ----
 echo
@@ -392,7 +398,7 @@ if [[ -s "$RESULT_DIR/hotspots.csv" ]]; then
     echo "  [ OK ] top hotspot is a GPU kernel"
   fi
 else
-  echo "  [WARN] hotspots.csv missing; check hotspots.err"
+  echo "  [WARN] hotspots.csv missing (report failed or empty)"
 fi
 
 # Check 4: ROI elapsed within tolerance of benchmark wall-clock
@@ -420,7 +426,19 @@ fi
 set -e
 set -o pipefail
 
+# ---- Step 8: Shrink the result dir ----
+# `-discard-raw-data` drops the raw collector byte-streams once the CSVs and
+# sqlite-db are generated. The .vtune project still opens in the GUI but
+# in-kernel source-view / re-finalization won't work. Skip via VTUNE_KEEP_RAW=1
+# if you need those. Typical savings: ~50-70% (a 160 MB result drops to ~60 MB).
+if [[ "${VTUNE_KEEP_RAW:-0}" != "1" ]]; then
+  BEFORE=$(du -sm "$RESULT_DIR" 2>/dev/null | awk '{print $1}')
+  vtune -finalize -r "$RESULT_DIR" -discard-raw-data >/dev/null 2>&1 || true
+  AFTER=$(du -sm "$RESULT_DIR" 2>/dev/null | awk '{print $1}')
+  echo "Result dir shrunk from ${BEFORE:-?} MB to ${AFTER:-?} MB (set VTUNE_KEEP_RAW=1 to preserve raw data)."
+fi
+
 echo
 echo "Done. Result: $RESULT_DIR"
 echo "Open with: vtune-gui $RESULT_DIR"
-echo "CSV reports: summary.csv, hotspots.csv, tasks.csv"
+echo "CSV reports (only the ones that produced data): summary.csv, hotspots.csv, tasks.csv"

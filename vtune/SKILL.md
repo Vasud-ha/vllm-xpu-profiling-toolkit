@@ -485,26 +485,37 @@ The GUI is not required to extract hotspots. Use this when:
 
 ### 11.1 Single-result reports
 
+`run_vtune_vllm.sh` emits exactly three CSVs — nothing more:
+
+| File | Contents |
+|---|---|
+| `summary.csv` | GPU Time, EU active %, BW %, elapsed |
+| `hotspots.csv` | Top 25 computing tasks by GPU Time |
+| `tasks.csv`   | ITT task domains/labels (only when ITT tasks were emitted) |
+
+Design rules the script follows so the result dir stays small:
+
+1. `stderr` is folded into `stdout`. No `.err` sidecar files. If a report
+   fails, the first 5 error lines are printed inline and the output file is
+   removed.
+2. Empty CSVs are deleted (no zero-byte placeholders).
+3. After finalization the raw collector byte-stream is dropped with
+   `vtune -finalize -discard-raw-data`. The `.vtune` project still opens in
+   the GUI but re-finalization / in-kernel source-view will not work. Set
+   `VTUNE_KEEP_RAW=1` on the launch to preserve the raw data. Typical
+   saving: 50-70% (a ~160 MB result drops to ~60 MB).
+
+The equivalent hand commands, for reference:
+
 ```bash
-# Top hotspots (CSV, machine-parseable)
-vtune -report hotspots -r $RESULT_DIR \
-      -group-by computing-task \
-      -format csv -limit 25 > $RESULT_DIR/hotspots.csv
+vtune -report summary       -r $RESULT_DIR -format csv > $RESULT_DIR/summary.csv
+vtune -report gpu-hotspots  -r $RESULT_DIR -group-by computing-task \
+                            -format csv -limit 25 > $RESULT_DIR/hotspots.csv
+# `-report tasks` was renamed to `-report top-tasks` in VTune 2026.
+vtune -report top-tasks     -r $RESULT_DIR -format csv > $RESULT_DIR/tasks.csv
 
-# Top-line summary (GPU Time, EU active %, BW %, elapsed)
-vtune -report summary -r $RESULT_DIR \
-      -format csv > $RESULT_DIR/summary.csv
-
-# Per-task GPU Time + EU stalls (good for ranking attention vs. GEMM)
-vtune -report hw-events -r $RESULT_DIR \
-      -group-by computing-task \
-      -format csv -limit 25 > $RESULT_DIR/hw-events.csv
-
-# Phase breakdown when ITT tasks were emitted (see vllm-integration.md §3).
-# NOTE: `-report tasks` was renamed to `-report top-tasks` in VTune 2026.
-# Use `top-tasks` on 2026+; use `tasks` on 2024.x / 2025.x.
-vtune -report top-tasks -r $RESULT_DIR \
-      -format csv > $RESULT_DIR/tasks.csv
+# Shrink the result dir (optional; run after all reports are generated).
+vtune -finalize -r $RESULT_DIR -discard-raw-data
 ```
 
 ### 11.2 Baseline vs. candidate diff
