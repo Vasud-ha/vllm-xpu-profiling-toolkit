@@ -84,9 +84,16 @@ rm -f "$VTUNE_ROI_GATE"   # ensure clean start
 # into a subshell launched by `docker exec bash -lc`. Skipping the source
 # when SETVARS_COMPLETED=1 leaves `vtune` off PATH and preflight fails.
 # setvars.sh is idempotent with --force, so re-sourcing is safe.
+#
+# We temporarily drop `set -euo pipefail` around the source because setvars.sh
+# uses `local`/`return`/`unset` on nonempty vars in ways that a strict shell
+# treats as failures — the sourced script then propagates a non-zero return
+# and kills our wrapper. Isolating it protects the rest of the script.
 if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
+  set +euo pipefail
   # shellcheck disable=SC1091
   source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
+  set -euo pipefail
 else
   echo "WARN: /opt/intel/oneapi/setvars.sh not found - vtune may not be on PATH"
 fi
