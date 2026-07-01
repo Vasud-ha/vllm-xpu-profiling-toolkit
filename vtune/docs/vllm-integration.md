@@ -2,24 +2,28 @@
 
 ## vLLM Version Compatibility (READ FIRST)
 
-The skill targets **vLLM v1** (default since ~0.10, including `intel/vllm:0.14.1-xpu`).
-Several module paths and APIs differ between v0 and v1:
+This skill targets **vLLM v1 exclusively** (default since ~0.10, including
+`intel/vllm:0.14.1-xpu` and every 0.17-xpu build validated since). The wrapper
+raises `RuntimeError` if `vllm.v1.worker.gpu_worker.Worker` isn't importable —
+we intentionally do not fall back to the legacy v0 path.
 
-| Concern | v0 (legacy) | v1 (current, intel/vllm:0.14.1-xpu) |
-|---------|-------------|-------------------------------------|
-| Worker class | `vllm.worker.worker.Worker` | `vllm.v1.worker.gpu_worker.Worker` |
-| Engine core | `LLMEngine` (in-process) | `EngineCore` subprocess (multi-proc) |
-| `execute_model` arg | `ExecuteModelRequest` with `seq_group_metadata_list[*].is_prompt` | `SchedulerOutput` with `scheduled_new_reqs` / `scheduled_cached_reqs` |
-| API server `main()` | exported | NOT exported — invoke via `python -m` or `runpy` |
-| ITT in engine subprocess | not relevant | needs ITT init in the engine subprocess, not the API parent |
+Key v1 primitives every pattern below depends on:
 
-**Multi-process gotcha (v1):** `vllm.entrypoints.openai.api_server` runs in a parent
-process; the GPU worker runs in an `EngineCore` subprocess fork/spawn'd later.
-ITT calls made in the parent BEFORE the fork won't reach the child if the child
-spawns fresh. Patch `Worker.execute_model` *as a class method on the imported
-class* before the engine starts — the subprocess re-imports the patched class.
-For external `vtune -command resume/pause`, this is moot: vtune controls all
-descendants under its umbrella.
+| Concern | v1 path |
+|---------|---------|
+| Worker class | `vllm.v1.worker.gpu_worker.Worker` |
+| Engine core | `EngineCore` subprocess (multi-process; separate from the API server) |
+| `execute_model` arg | `SchedulerOutput` with `scheduled_new_reqs` / `scheduled_cached_reqs` and `num_scheduled_tokens` |
+| API server `main()` | NOT exported — invoke via `python -m` or `runpy` |
+| ITT in engine subprocess | must be initialized inside the subprocess, not the API parent |
+
+**Multi-process gotcha:** `vllm.entrypoints.openai.api_server` runs in a
+parent process; the GPU worker runs in an `EngineCore` subprocess fork/spawn'd
+later. ITT calls made in the parent BEFORE the fork won't reach the child if
+the child spawns fresh. Patch `Worker.execute_model` *as a class method on the
+imported class* before the engine starts — the subprocess re-imports the
+patched class. For external `vtune -command resume/pause`, this is moot: vtune
+controls all descendants under its umbrella.
 
 ## vLLM Call Stack (v1, Profiling Perspective)
 
@@ -156,26 +160,20 @@ def _schedule_warmup_done():
 
 # ── Patch: execute_model (recommended) ─────────────────────────────────────
 if ROI_MODE == "execute_model":
-    # v1 path (default in vLLM >= 0.10, including intel/vllm:0.14.1-xpu).
-    # Fall back to v0 path only if v1 is missing.
-    try:
-        from vllm.v1.worker.gpu_worker import Worker
-        _v1 = True
-    except ImportError:
-        from vllm.worker.worker import Worker  # legacy v0
-        _v1 = False
+    # v1-only. If this import fails, upgrade vLLM — we don't fall back.
+    from vllm.v1.worker.gpu_worker import Worker
     import torch
 
     _original_execute = Worker.execute_model
 
-    def _vtune_execute_model(self, scheduler_output_or_req, *args, **kwargs):
+    def _vtune_execute_model(self, scheduler_output, *args, **kwargs):
         if _warmup_done or PROFILE_WARMUP:
             with vtune_roi(sync_device="xpu"):
-                return _original_execute(self, scheduler_output_or_req, *args, **kwargs)
-        return _original_execute(self, scheduler_output_or_req, *args, **kwargs)
+                return _original_execute(self, scheduler_output, *args, **kwargs)
+        return _original_execute(self, scheduler_output, *args, **kwargs)
 
     Worker.execute_model = _vtune_execute_model
-    logger.info(f"Patched {'v1' if _v1 else 'v0'} Worker.execute_model for VTune ROI")
+    logger.info("Patched vllm.v1 Worker.execute_model for VTune ROI")
 
 # ── Patch: model.forward (tightest) ────────────────────────────────────────
 elif ROI_MODE == "model_forward":
@@ -209,27 +207,28 @@ elif ROI_MODE == "model_forward":
         logger.warning(f"Could not patch model loader: {e}. Falling back to execute_model mode.")
         ROI_MODE = "execute_model"
 
-# ── Patch: engine.step (broadest useful) ───────────────────────────────────
+# ── Patch: engine.step (broadest useful; v1 EngineCore subprocess) ─────────
 elif ROI_MODE == "engine_step":
-    from vllm.engine.llm_engine import LLMEngine
-    _original_step = LLMEngine.step
+    # v1 splits scheduling into EngineCore.step (in a subprocess). Patch there,
+    # not the legacy LLMEngine — LLMEngine is a thin front-end shim now.
+    from vllm.v1.engine.core import EngineCore
+    _original_step = EngineCore.step
 
-    def _vtune_step(self):
+    def _vtune_step(self, *args, **kwargs):
         if _warmup_done or PROFILE_WARMUP:
             with vtune_roi(sync_device="xpu"):
-                return _original_step(self)
-        return _original_step(self)
+                return _original_step(self, *args, **kwargs)
+        return _original_step(self, *args, **kwargs)
 
-    LLMEngine.step = _vtune_step
-    logger.info("Patched LLMEngine.step for VTune ROI")
+    EngineCore.step = _vtune_step
+    logger.info("Patched vllm.v1 EngineCore.step for VTune ROI")
 
 # ── Schedule warmup completion ──────────────────────────────────────────────
 _schedule_warmup_done()
 
 # ── Launch vLLM normally ────────────────────────────────────────────────────
-# vLLM removed the `main` symbol from api_server in v1. Use runpy to invoke
-# the module's __main__ block exactly like `python -m vllm.entrypoints.openai.api_server`.
-# This is version-proof — works on v0 and v1 (incl. intel/vllm:0.14.1-xpu).
+# vLLM v1 does not export `main` from api_server. Use runpy to invoke the
+# module's __main__ block exactly like `python -m vllm.entrypoints.openai.api_server`.
 if __name__ == "__main__":
     import runpy
     sys.argv[0] = "vllm.entrypoints.openai.api_server"
@@ -287,10 +286,6 @@ def _prefill_only_execute(self, so, *args, **kwargs):
 
 Worker.execute_model = _prefill_only_execute
 ```
-
-> **For v0 (legacy):** import `Worker` from `vllm.worker.worker` and detect prefill via
-> `any(sg.is_prompt for sg in execute_model_req.seq_group_metadata_list)`.
-> The v0 path is preserved in git history if you need it.
 
 ---
 
@@ -480,22 +475,19 @@ def setup_rank_profiling(rank: int, world_size: int):
     ittapi.thread_set_name(f"vllm_gpu_rank{rank}_of_{world_size}")
     init_paused()   # Each rank independently starts paused
 
-# ITT-based ROI in each rank's execute_model:
-try:
-    from vllm.v1.worker.gpu_worker import Worker   # vLLM v1 (default)
-except ImportError:
-    from vllm.worker.worker import Worker          # legacy v0
+# ITT-based ROI in each rank's execute_model (v1-only):
+from vllm.v1.worker.gpu_worker import Worker
 from vtune_itt import vtune_roi
 import torch
 
 _orig_execute = Worker.execute_model
 
-def _multi_rank_execute(self, scheduler_output_or_req, *args, **kwargs):
+def _multi_rank_execute(self, scheduler_output, *args, **kwargs):
     # Each rank controls its own ITT state independently.
     # vtune -command resume affects all ranks simultaneously (umbrella scope).
     # itt_resume() / itt_pause() affect only THIS rank's process.
     with vtune_roi(sync_device="xpu"):
-        return _orig_execute(self, scheduler_output_or_req, *args, **kwargs)
+        return _orig_execute(self, scheduler_output, *args, **kwargs)
 
 Worker.execute_model = _multi_rank_execute
 ```

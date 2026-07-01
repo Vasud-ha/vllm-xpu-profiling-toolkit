@@ -262,15 +262,20 @@ def execute_model(self, ...):
 
 ## 5. ROI Boundaries: Best Choices for LLM
 
-vLLM v1 (default ≥0.10, including `intel/vllm:0.14.1-xpu`) split the engine
-across processes. The Worker class moved; entry-point symbols changed:
+This skill targets **vLLM v1 exclusively** (default ≥0.10, including
+`intel/vllm:0.14.1-xpu` and every 0.17-xpu build validated since). The v0
+worker path (`vllm.worker.worker.Worker`, `ExecuteModelRequest`,
+`seq_group_metadata_list`) is not supported — the wrapper raises `RuntimeError`
+at import time if v1 isn't available.
 
-| Concern | v0 path | v1 path (current) |
-|---------|---------|-------------------|
-| Worker class | `vllm.worker.worker.Worker` | `vllm.v1.worker.gpu_worker.Worker` |
-| `execute_model` arg | `ExecuteModelRequest` | `SchedulerOutput` |
-| Phase detection | `seq_group_metadata_list[*].is_prompt` | `bool(scheduler_output.scheduled_new_reqs)` |
-| API server entry | `from ... import main; main()` | `runpy.run_module("vllm.entrypoints.openai.api_server", run_name="__main__", alter_sys=True)` |
+Key v1 primitives the wrapper relies on:
+
+| Concern | v1 path |
+|---------|---------|
+| Worker class | `vllm.v1.worker.gpu_worker.Worker` |
+| `execute_model` arg | `SchedulerOutput` |
+| Phase detection | `bool(scheduler_output.scheduled_new_reqs)` and `num_scheduled_tokens` |
+| API server entry | `runpy.run_module("vllm.entrypoints.openai.api_server", run_name="__main__", alter_sys=True)` |
 
 | Target | Integration Point (v1) | Granularity | Noise Level |
 |--------|------------------------|-------------|-------------|

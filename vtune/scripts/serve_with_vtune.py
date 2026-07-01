@@ -3,11 +3,12 @@
 serve_with_vtune.py - Launch vLLM OpenAI server with phase-aware VTune ROI.
 
 Patches Worker.execute_model so that, while the gate is open, only the
-requested phase's batches are profiled. Compatible with vLLM v0
-(vllm.worker.worker.Worker) and v1 (vllm.v1.worker.gpu_worker.Worker -
-default in intel/vllm:0.14.1-xpu).
+requested phase's batches are profiled. Targets vLLM v1 exclusively
+(vllm.v1.worker.gpu_worker.Worker — default in intel/vllm:0.14.1-xpu and
+every supported release since). If the v1 Worker can't be imported, the
+wrapper refuses to start rather than silently downgrading.
 
-Phase classification (v1):
+Phase classification:
   prefill    - new request(s) entering the model with new tokens to compute
   decode     - only cached requests, advancing past their prompts
   mixed      - chunked prefill landing alongside decode in the same step
@@ -101,23 +102,7 @@ def _gate_open() -> bool:
     return os.path.exists(ROI_GATE_PATH)
 
 
-# ---------- Phase classification ----------
-
-def _is_prefill_v0(req) -> bool:
-    md_list = getattr(req, "seq_group_metadata_list", None) or []
-    for md in md_list:
-        if getattr(md, "is_prompt", False):
-            return True
-    return False
-
-
-def _classify_v0(req) -> tuple:
-    """v0 returns (phase, batch_size, scheduled_tokens). batch_size and tokens
-    are best-effort; v0 path is only kept for backwards compat."""
-    md_list = getattr(req, "seq_group_metadata_list", None) or []
-    bs = len(md_list)
-    is_prefill = any(getattr(md, "is_prompt", False) for md in md_list)
-    return ("prefill" if is_prefill else "decode" if bs else "empty", bs, 0)
+# ---------- Phase classification (vLLM v1 only) ----------
 
 
 def _classify_v1(scheduler_output) -> tuple:
@@ -225,9 +210,7 @@ def _patch_worker(worker_cls, classify):
     orig = worker_cls.execute_model
 
     def wrapped(self, *args, **kwargs):
-        req = (args[0] if args
-               else kwargs.get("execute_model_req")
-               or kwargs.get("scheduler_output"))
+        req = args[0] if args else kwargs.get("scheduler_output")
         try:
             phase, bs, tok = classify(req) if req is not None else ("empty", 0, 0)
         except Exception as e:
@@ -272,23 +255,17 @@ def _patch_worker(worker_cls, classify):
 
 
 def _try_patch():
-    """Patch the GPU Worker class. Prefer v1 (default in vLLM >= 0.10,
-    including intel/vllm:0.14.1-xpu); fall back to v0 only if v1 is absent."""
+    """Patch the vLLM v1 GPU Worker class. This wrapper is v1-only; if the
+    import fails we refuse to start rather than silently profiling everything."""
     try:
         from vllm.v1.worker.gpu_worker import Worker as WorkerV1  # type: ignore
-        _patch_worker(WorkerV1, _classify_v1)
-        return
     except ImportError as e:
-        log.debug("v1 worker not available: %s", e)
-
-    try:
-        from vllm.worker.worker import Worker as WorkerV0  # type: ignore
-        _patch_worker(WorkerV0, _classify_v0)
-        return
-    except ImportError as e:
-        log.debug("v0 worker not available: %s", e)
-
-    log.warning("Could not patch any vLLM Worker class - profiling will not isolate phases")
+        raise RuntimeError(
+            "vllm.v1.worker.gpu_worker.Worker not importable — this wrapper "
+            "targets vLLM v1 only. Upgrade to a build that exposes the v1 "
+            "engine (intel/vllm >= 0.14.1-xpu, upstream vLLM >= 0.10)."
+        ) from e
+    _patch_worker(WorkerV1, _classify_v1)
 
 
 _try_patch()
@@ -303,9 +280,9 @@ log.info(
 # ---------- Hand off to vLLM's normal entrypoint ----------
 
 if __name__ == "__main__":
-    # vLLM v1 (incl. intel/vllm:0.14.1-xpu) does not export `main` from
-    # api_server. Use runpy to invoke the module's __main__ block exactly like
-    # `python -m vllm.entrypoints.openai.api_server`. Works on v0 and v1.
+    # vLLM v1 does not export `main` from api_server. Use runpy to invoke the
+    # module's __main__ block exactly like
+    # `python -m vllm.entrypoints.openai.api_server`.
     import runpy
     sys.argv[0] = "vllm.entrypoints.openai.api_server"
     runpy.run_module(

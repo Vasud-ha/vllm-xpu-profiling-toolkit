@@ -154,11 +154,14 @@ preflight() {
     fail=1
   fi
 
-  # 6. vLLM v1 import works
+  # 6. vLLM v1 import works (this skill is v1-only; no fallback)
   if python -c 'from vllm.v1.worker.gpu_worker import Worker' 2>/dev/null; then
     echo "  [ OK ] vllm.v1.worker.gpu_worker.Worker importable"
   else
-    echo "  [WARN] vllm v1 Worker import failed; will fall back to v0 path"
+    echo "  [FAIL] vllm.v1.worker.gpu_worker.Worker not importable"
+    echo "         This wrapper is vLLM v1-only. Upgrade to a build with the v1"
+    echo "         engine (intel/vllm >= 0.14.1-xpu, upstream vLLM >= 0.10)."
+    fail=1
   fi
 
   # 7. Nothing already on $PORT
