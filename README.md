@@ -89,6 +89,35 @@ Prints a PASS/WARN/FAIL per skill and exits non-zero on any FAIL.
   `run_vtune_vllm.sh` both `[WARN]` when they detect `xe`. For BMG kernel
   attribution, prefer the **unitrace** skill until VTune 2026+ ships xe support.
 
+## What was validated
+
+Every wrapper below was executed end-to-end against a fresh checkout of
+`main` — no local edits, no manual patching — with the environment listed
+here. If your setup differs, expect to hit different edges; the scripts
+are best-effort on other hardware/versions.
+
+| Item | Value |
+|---|---|
+| Validation date | 2026-07-01 |
+| Host | `gnrsp-bmg3.iind.intel.com` (Ubuntu 24.04, kernel 6.17) |
+| Container image | `intel/vllm:0.17.0-xpu` |
+| vLLM | `0.1.dev14456+gde3f7fe65.xpu` (v1 engine) |
+| GPU | Intel BMG / Xe2 (device `0xe223`), `xe` kernel driver |
+| oneAPI Base Toolkit | 2025.3 (preinstalled in the image) |
+| VTune Profiler | 2025.10.0 (apt-installed from Intel oneAPI repo) |
+| Metrics Discovery | `intel-metrics-discovery 1.14.180-1111~24.04` |
+| unitrace | pti-gpu build at `/data/workspace/vasudha/pti-gpu/tools/unitrace/build/unitrace` |
+| Model used | `meta-llama/Llama-3.1-8B-Instruct` (float16, `--enforce-eager`) |
+
+Wrapper results:
+
+| Wrapper | Result |
+|---|---|
+| `pytorch-profiler/scripts/run_pt_profile_vllm.sh` | ✅ PASS — server up, warmup + bench under `--profiler-config`, traces + summary |
+| `unitrace/scripts/run_unitrace_vllm.sh` | ✅ PASS — unitrace `--start-paused`, ITT-driven ROI, EXIT trap → `unitrace_vllm_report.html` |
+| `vtune/scripts/run_vtune_vllm.sh` | ⚠️ Preflight PASS, collect hits the documented BMG/xe VTune limitation (see [Known limitations](#known-limitations)); wrapper WARNs before starting and exits with an actionable error |
+| `scripts/check_prereqs.sh` | ✅ PASS — all three skills reported ready |
+
 ## Status & scope
 
 These are working recipes — not a packaged product. Paths and version pins reflect what we validated on; expect to edit env vars and adjust ROI bounds for your model and workload. See each folder's `SKILL.md` for the full set of knobs and known pitfalls.
