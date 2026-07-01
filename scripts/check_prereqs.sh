@@ -7,7 +7,8 @@
 #
 # Exit code: 0 if all skills are runnable (WARN OK), non-zero if any FAIL.
 
-set -u
+# Deliberately NOT using `set -u` -- sourcing /opt/intel/oneapi/setvars.sh
+# below trips on unset internal vars in some oneAPI releases.
 set +e   # keep going after each check
 
 # ---- Terminal colors (optional) ----
