@@ -1,0 +1,309 @@
+================================================================================
+  Profiler Comparison: PyTorch Profiler vs Intel VTune vs pti-gpu unitrace
+  For vLLM serving on Intel Xe / Xe2 GPUs
+================================================================================
+
+
+TL;DR - one sentence each
+=========================
+
+- PyTorch profiler ..... "which layer of my model / vLLM stack is slow?"
+                        Python/module-level view backed by torch.profiler,
+                        emitted as Perfetto-loadable .pt.trace.json.
+
+- pti-gpu unitrace ..... "where on the timeline is time going, host vs device?"
+                        Low-overhead Level Zero + SYCL + oneCCL + oneDNN + ITT
+                        runtime tracer, emitted as Chrome-trace JSON.
+
+- Intel VTune .......... "why is this specific GPU kernel slow?"
+                        Hardware-counter GPU-Hotspots profiler with EU stall
+                        attribution, occupancy, bandwidth, IPC.
+
+
+Where each tool hooks the stack
+===============================
+
+vLLM on Intel Xe has ~7 layers between your prompt and the GPU. Each profiler
+hooks at a different layer, which is why their traces look so different.
+
+  Layer                                             | Hooked by
+  --------------------------------------------------+----------------------
+  HTTP / OpenAI API surface                         | -
+  vLLM scheduler / AsyncLLMEngine / EngineCore      | PyTorch profiler
+  vLLM Worker.execute_model (per step)              | PyTorch profiler
+  model.forward (Llama layers)                      | PyTorch profiler
+  aten:: / _C:: ops through torch dispatcher        | PyTorch profiler
+  SYCL / oneDNN / oneCCL / vLLM custom kernels      | unitrace
+  Level Zero API (ze* / urKernelSetArg / ...)       | unitrace
+  Intel Xe / Xe2 GPU EUs / XMX / HBM / LLC          | VTune
+
+Which is why:
+
+- PyTorch profiler answers "which layer".
+- unitrace answers "where on the timeline".
+- VTune answers "why on the silicon".
+
+
+Side-by-side comparison
+=======================
+
+  Dimension               | PyTorch profiler       | VTune GPU-Hotspots       | unitrace
+  ------------------------+------------------------+--------------------------+---------------------------
+  Primary question        | "which layer"          | "why is this kernel slow"| "where is time going"
+  Level of the stack      | Python / dispatcher    | GPU hardware counters    | Level Zero / SYCL runtime
+  Overhead                | low-medium             | medium (HW sampling)     | very low (call tracing)
+  Trace format            | .pt.trace.json         | .vtune result dir + CSV  | Chrome-trace .json per PID
+  Viewer                  | Perfetto / chrome://   | vtune-gui or CSV         | Perfetto / chrome://
+  ROI control             | /start_profile HTTP    | -start-paused + ITT      | --start-paused + ITT
+  Kernel names            | yes (dispatcher-visible)| yes (Level Zero)        | yes (Level Zero, demangled)
+  Kernel shapes           | no                     | yes                      | yes (--verbose)
+  EU-active / EU-stall %  | no                     | yes                      | no
+  HBM / LLC bandwidth     | no                     | yes                      | no
+  Per-step / per-request  | yes (record_function)  | yes (ITT tasks)          | yes (ITT + shapes)
+  Multi-rank (TP > 1)     | one file per rank      | umbrella + per-rank ITT  | one file per PID
+  Setup cost              | low (ships with vLLM)  | medium (apt install)     | medium (build pti-gpu)
+  Works on BMG / Xe2 today| yes                    | preflight-blocked (xe)   | yes
+
+
+Per-tool detail
+===============
+
+1. PyTorch profiler - framework view
+------------------------------------
+
+PyTorch's built-in profiler hooks the dispatcher and Python frame entry, then
+asks the backend (CUDA via CUPTI, or Intel XPU via Kineto + Level Zero hooks)
+to also stamp the GPU kernel each op launched. vLLM ships first-class
+integration: enable the torch backend at server start and POST /start_profile
+and /stop_profile just work.
+
+The gate changed at vLLM 0.17. The old VLLM_TORCH_PROFILER_DIR env var is now
+silently ignored (server logs "Unknown vLLM environment variable"); the profile
+router only attaches when --profiler-config supplies a ProfilerConfig JSON.
+
+How to bracket the ROI:
+
+  # vLLM >= 0.17 (current):
+  vllm serve meta-llama/Llama-3.1-8B-Instruct --enforce-eager --max-num-seqs 32 \
+    --profiler-config '{"profiler":"torch","torch_profiler_dir":"/abs/path","torch_profiler_use_gzip":true}'
+
+  # vLLM <= 0.14 (legacy):
+  export VLLM_TORCH_PROFILER_DIR=$HOME/vllm_profile
+  vllm serve meta-llama/Llama-3.1-8B-Instruct --enforce-eager
+
+  # From another shell, or via `vllm bench serve --profile`:
+  curl -X POST http://localhost:8000/start_profile
+  <run inference>
+  curl -X POST http://localhost:8000/stop_profile
+
+What the trace looks like:
+Open the .pt.trace.json in Perfetto. CPU thread has the call tree
+(execute_model -> LlamaForCausalLM.forward -> LlamaDecoderLayer.forward ->
+LlamaAttention.forward -> F.scaled_dot_product_attention -> aten::matmul);
+GPU/XPU stream shows the actual kernel each op launched.
+
+What it cannot tell you:
+- EU active %, HBM bandwidth utilization, stall reasons (needs VTune).
+- Host-side L0 dispatch latency, oneCCL allreduce internals, oneDNN primitive
+  selection (needs unitrace).
+
+
+2. Intel VTune GPU-Hotspots - hardware view
+-------------------------------------------
+
+VTune samples GPU hardware counters (EU active, EU stall, IPC, occupancy,
+sub-slice load, HBM/LLC bandwidth) and ranks kernels by GPU time. With
+-knob profiling-mode=source-analysis on Xe it attributes EU stalls to
+instructions in a single kernel. -start-paused + ITT API gives the same ROI
+control surface as the other tools.
+
+How to bracket the ROI:
+
+  vtune -collect gpu-hotspots -start-paused -result-dir ./vt \
+    -- python serve_with_vtune.py --model meta-llama/Llama-3.1-8B-Instruct \
+       --enforce-eager --port 8000 &
+
+  # From another shell:
+  curl -X POST http://localhost:8000/start_profile     # (ITT resume in vLLM)
+  <run inference>
+  curl -X POST http://localhost:8000/stop_profile      # (ITT pause + xpu sync)
+  vtune -command pause -r ./vt
+  vtune -command stop  -r ./vt
+
+Output:
+- Bottom-up view: kernels sorted by GPU Time with EU active / EU stall / BW.
+- Source-analysis view: EU-stall instructions with source-line attribution.
+- CSV reports for regression gating (summary.csv, hotspots.csv, tasks.csv).
+
+What it cannot tell you:
+- vLLM scheduler decisions / Python overhead (needs PyTorch profiler).
+- Continuous host-side timeline of L0 calls (needs unitrace).
+
+
+3. pti-gpu unitrace - runtime trace view
+----------------------------------------
+
+unitrace hooks Level Zero (and optionally OpenCL, SYCL runtime, oneDNN, oneCCL,
+MPI, ITT) and dumps a Chrome-trace JSON per process. Very low overhead - call
+tracing, not counter sampling. Great for "why is there a 40 ms gap between
+these two GEMM launches" questions.
+
+How to bracket the ROI:
+
+  cd unitrace/scripts
+  UNITRACE_PRESET=default MODEL=meta-llama/Llama-3.1-8B-Instruct \
+    ./run_unitrace_vllm.sh
+  # then from any HTTP client:
+  curl -X POST http://localhost:9090/start_profile
+  <run inference>
+  curl -X POST http://localhost:9090/stop_profile
+  # SIGINT the python (NOT unitrace) so it flushes on inferior exit.
+
+Output:
+- python.<pid>.json - Chrome trace with GPU kernels + host L0/SYCL/DNN calls.
+- unitrace.log - Device Timing Summary (top kernels by device time).
+- unitrace_vllm_report.html - self-contained per-run report (via
+  generate_report.py, auto-run from the wrapper's EXIT trap).
+
+What it cannot tell you:
+- Which model layer or Python function issued the kernel (needs PyTorch profiler).
+- EU stalls / bandwidth (needs VTune).
+
+
+Advantages and disadvantages
+============================
+
+PyTorch profiler
+  Pros:
+  - First-class vLLM integration (--profiler-config on >=0.17,
+    VLLM_TORCH_PROFILER_DIR on <=0.14, vllm bench serve --profile).
+  - Vendor-agnostic - same recipe on CUDA and XPU.
+  - Low friction to enable, comes with vLLM.
+  - Timeline correlates Python ops with GPU kernels.
+  Cons:
+  - No HW counters (no EU stall, no bandwidth breakdown).
+  - Traces get huge fast with record_shapes / with_stack on.
+  - Less useful for kernel-internal optimization.
+
+Intel VTune GPU-Hotspots
+  Pros:
+  - HW counters: EU active / stall, occupancy, bandwidth, IPC.
+  - Source-analysis mode attributes EU stalls to instructions.
+  - Best tool once you already know the hotspot and want the root cause.
+  Cons:
+  - Heavy install (~1-2 GB) beyond the base oneAPI toolkit.
+  - Overhead higher than the other two.
+  - Not fully supported on the xe kernel driver in 2025.x (see gotchas).
+
+pti-gpu unitrace
+  Pros:
+  - Very low overhead - suitable for long runs.
+  - Chrome/Perfetto-compatible trace with rich lane detail.
+  - Presets tune the noise level (lite, default, ccl, dnn, mpi, full).
+  - Xe/Xe2-friendly today.
+  Cons:
+  - Build step required (BMG/Xe2 needs a generator patch, see unitrace/SKILL.md).
+  - No HW counters; can't tell you WHY a kernel is slow at the silicon level.
+  - No model-layer / Python correlation.
+
+
+Best-fit scenarios
+==================
+
+  Scenario                                                  | Reach for
+  ----------------------------------------------------------+----------------------------
+  "vLLM decode TPOT dropped 15% after a rebase"             | PyTorch profiler first
+                                                            | (framework-level diff)
+  "This decoder-layer forward is slow, is it the attn?"     | PyTorch profiler
+  "GPU is at 100% but tokens/sec is low"                    | unitrace (find gaps)
+                                                            | -> VTune (find why)
+  "Compare batch=1 vs batch=8 decode step layout"           | unitrace timeline
+  "TP=2 allreduce is bigger than the kernel it follows"     | unitrace --chrome-ccl-logging
+  "GEMM_kernel takes X ms - can we make it Y?"              | VTune GPU-Hotspots +
+                                                            | -knob source-analysis
+  "Which SYCL/oneDNN primitive is being picked?"            | unitrace --chrome-dnn-logging
+  "One-off regression gate in CI"                           | PyTorch profiler
+                                                            | (JSON + summarize)
+
+
+Decision flow
+=============
+
+  Start with symptom
+       |
+       v
+  Framework diff (PyTorch profiler)
+       |  localize to a layer
+       v
+  Timeline scan (unitrace)
+       |  identify the kernel & how often it runs
+       v
+  Silicon deep-dive (VTune source-analysis)
+       |  explain why it stalls
+       v
+  Root cause + fix
+
+
+Using them together
+===================
+
+The vLLM server can have all three of --profiler-config (torch), ITT-driven
+unitrace endpoints, and ITT-driven VTune endpoints wired up at once. Pick the
+active backend by what wraps the `python ...` launch:
+
+  # No wrapper -> only PyTorch profiler (via /start_profile)
+  python serve_with_vtune.py --profiler-config '{...}' ...
+
+  # unitrace wrapper -> ITT drives unitrace
+  unitrace --start-paused ... python serve_with_unitrace.py ...
+
+  # VTune wrapper -> ITT drives VTune
+  vtune -collect gpu-hotspots -start-paused ... -- python serve_with_vtune.py ...
+
+The client - `curl /start_profile && vllm bench serve ... && curl /stop_profile`
+- is identical in all three cases.
+
+
+Cross-tool gotchas on Intel Xe / Xe2
+====================================
+
+  Gotcha                                          | Affects       | Fix
+  ------------------------------------------------+---------------+-----------------------------------
+  Forgetting torch.xpu.synchronize() before       | VTune,        | Empty/clipped GPU timeline. Always
+  __itt_pause()                                   | unitrace      | sync before pausing.
+  torch.compile + SYCL JIT -> llvm-foreach SEGV   | all three     | Launch with --enforce-eager on
+  or unreadable names                             |               | intel/vllm-xpu.
+  Manually setting ZE_ENABLE_TRACING_LAYER=1      | VTune         | Conflicts with VTune's own tracer
+                                                  |               | -> empty timeline. Leave it unset.
+  vLLM v1 spawns EngineCore in a subprocess;      | VTune,        | Patch vllm.v1.worker.gpu_worker
+  ITT in API server doesn't reach the worker      | unitrace      | .Worker.execute_model or use a
+                                                  |               | filesystem gate file the worker
+                                                  |               | re-checks each step.
+  BMG/Xe2 + recent oneAPI: pti-gpu build error    | unitrace      | Patch scripts/gen_tracing_callbacks
+  ze_ipc_event_counter_based_handle_t cast        | build         | .py with the templated helper,
+                                                  |               | regenerate, rebuild.
+  BMG/Xe2 (xe kernel driver) + VTune 2025.x:      | VTune         | VTune 2025.x metric-discovery was
+  "Hottest GPU Computing Tasks" comes back empty  | GPU-Hotspots  | validated on i915. Use unitrace
+                                                  | & gpu-offload | for BMG kernel attribution until
+                                                  |               | VTune 2026+ ships xe-native support.
+                                                  |               | run_vtune_vllm.sh WARNs at preflight.
+  VTune: "Cannot collect GPU hardware metrics -   | VTune         | Install intel-metrics-discovery,
+  neither libigdmd.so nor libmd.so was found"     |               | then create the missing symlink:
+                                                  |               |   ln -sf libigdmd.so.1 \
+                                                  |               |     /usr/lib/x86_64-linux-gnu/libigdmd.so
+                                                  |               |   ldconfig
+  Profiling without warmup                        | all three     | Run a few warmup requests BEFORE
+                                                  |               | /start_profile; otherwise compile,
+                                                  |               | autotune, KV alloc dominate.
+  Treating "more decode steps captured"           | any timeline  | Normalize per step; longer runs
+  as "decode got slower"                          | tool          | make totals bigger.
+
+
+One-line summary
+================
+
+PyTorch profiler tells you WHICH LAYER.
+unitrace tells you WHERE ON THE TIMELINE.
+VTune tells you WHY ON THE SILICON.
+
+Pick the question first; the tool follows.

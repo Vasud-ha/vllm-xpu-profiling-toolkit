@@ -10,13 +10,7 @@ Profiling recipes, wrapper scripts, and analysis notes for **vLLM serving on Int
 
 All three share the same **ROI-gated collection pattern**: instead of profiling the full vLLM serve run, the wrapper toggles the collector on only during a specific phase (prefill / decode / a particular request range) so the resulting trace stays small and the overhead doesn't perturb the steady state.
 
-For a **side-by-side comparison** of what each profiler sees, when to reach for each, and how to combine them, open
-[`profiler_comparison_report.html`](./profiler_comparison_report.html):
-
-- **View rendered** (no clone needed) — via [htmlpreview.github.io](https://htmlpreview.github.io/?https://github.com/Vasud-ha/vllm-xpu-profiling-toolkit/blob/main/profiler_comparison_report.html) or [raw.githack.com](https://raw.githack.com/Vasud-ha/vllm-xpu-profiling-toolkit/main/profiler_comparison_report.html)
-- **Or clone and open locally**: `git clone …` then `xdg-open profiler_comparison_report.html` (Linux) / `open` (macOS) / `start` (Windows)
-
-GitHub serves `.html` files as plain text by default, which is why the proxy links above are needed for the rendered view.
+For a **side-by-side comparison** of what each profiler sees, when to reach for each, and how to combine them, see [`profiler_comparison.txt`](./profiler_comparison.txt) — GitHub renders it in-browser.
 
 ## Layout
 
