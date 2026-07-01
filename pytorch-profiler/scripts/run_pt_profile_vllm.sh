@@ -288,7 +288,9 @@ wait "$SERVER_PID" 2>/dev/null || true
 echo
 echo "===== Trace inventory ====="
 shopt -s nullglob
-TRACES=("$TORCH_TRACE_DIR"/*.pt.trace.json* "$TORCH_TRACE_DIR"/*.json.gz)
+# `.pt.trace.json*` already matches both plain and .gz variants; a separate
+# `*.json.gz` glob duplicates every .gz entry. One glob is enough.
+TRACES=("$TORCH_TRACE_DIR"/*.pt.trace.json*)
 shopt -u nullglob
 if [[ ${#TRACES[@]} -eq 0 ]]; then
   echo "  [FAIL] no trace files found in $TORCH_TRACE_DIR"

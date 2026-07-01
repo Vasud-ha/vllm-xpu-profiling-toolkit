@@ -64,10 +64,30 @@ python summarize_trace.py pt_profile_results/<timestamp>/trace.json
 
 ## Prerequisites
 
-- Intel oneAPI Base Toolkit ≥ 2025.x (for VTune, ITT, oneAPI runtimes)
-- `intel/vllm:*-xpu` container or an equivalent local install (vLLM + IPEX + torch.xpu)
+Full list — apt packages, pip modules, library symlinks, kernel-driver
+caveats — in [`PREREQUISITES.md`](./PREREQUISITES.md). At a glance:
+
+- Intel oneAPI Base Toolkit ≥ 2025.x (preinstalled in `intel/vllm:*-xpu`)
+- `intel/vllm:*-xpu` container ≥ 0.14.1-xpu (validated on 0.17.0-xpu)
 - A discrete Intel GPU (BMG / Arc / Max) with a recent Level Zero driver
-- For unitrace: a local build of [intel/pti-gpu](https://github.com/intel/pti-gpu) → `tools/unitrace`
+- **VTune skill only:** `apt install intel-oneapi-vtune intel-metrics-discovery`, plus the `libigdmd.so` symlink and `pip install ittapi`
+- **unitrace skill only:** a local build of [intel/pti-gpu](https://github.com/intel/pti-gpu) → `tools/unitrace` (see `unitrace/SKILL.md` §2)
+
+Verify a machine before invoking any wrapper:
+
+```bash
+./scripts/check_prereqs.sh
+```
+
+Prints a PASS/WARN/FAIL per skill and exits non-zero on any FAIL.
+
+## Known limitations
+
+- **VTune GPU-Hotspots on BMG/Xe2 (`xe` kernel driver).** VTune 2025.x was
+  validated on `i915`; on `xe` the collect completes but the per-kernel
+  "Hottest GPU Computing Tasks" table is often empty. `check_prereqs.sh` and
+  `run_vtune_vllm.sh` both `[WARN]` when they detect `xe`. For BMG kernel
+  attribution, prefer the **unitrace** skill until VTune 2026+ ships xe support.
 
 ## Status & scope
 

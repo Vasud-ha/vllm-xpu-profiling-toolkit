@@ -78,11 +78,17 @@ export VTUNE_ROI_MODE
 rm -f "$VTUNE_ROI_GATE"   # ensure clean start
 
 # ---- Environment ----
-if [[ -z "${SETVARS_COMPLETED:-}" ]]; then
+# Always (re-)source setvars.sh with --force. Reason: SETVARS_COMPLETED is an
+# environment variable set once at container start (via /etc/environment or
+# equivalent), but PATH additions from a prior interactive shell don't survive
+# into a subshell launched by `docker exec bash -lc`. Skipping the source
+# when SETVARS_COMPLETED=1 leaves `vtune` off PATH and preflight fails.
+# setvars.sh is idempotent with --force, so re-sourcing is safe.
+if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
   # shellcheck disable=SC1091
-  source /opt/intel/oneapi/setvars.sh
+  source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
 else
-  echo "oneAPI already sourced (SETVARS_COMPLETED=$SETVARS_COMPLETED) - skipping."
+  echo "WARN: /opt/intel/oneapi/setvars.sh not found - vtune may not be on PATH"
 fi
 # VTune manages Level Zero tracing itself; manual settings cause empty GPU timelines.
 for VAR in ZE_ENABLE_TRACING_LAYER ZE_LOADER_LAYERS_ENABLE \
@@ -162,6 +168,30 @@ preflight() {
     echo "         This wrapper is vLLM v1-only. Upgrade to a build with the v1"
     echo "         engine (intel/vllm >= 0.14.1-xpu, upstream vLLM >= 0.10)."
     fail=1
+  fi
+
+  # 6b. Intel Metrics Discovery library — required by vtune -collect gpu-hotspots.
+  # VTune dlopens libigdmd.so and libmd.so; without them collection dies with
+  # "Cannot collect GPU hardware metrics". apt package: intel-metrics-discovery.
+  if ldconfig -p 2>/dev/null | grep -qE 'libigdmd\.so'; then
+    echo "  [ OK ] libigdmd.so resolvable"
+  else
+    echo "  [FAIL] libigdmd.so not on the loader path"
+    echo "         Install with: apt install -y intel-metrics-discovery"
+    echo "         (then: ln -sf libigdmd.so.1 /usr/lib/x86_64-linux-gnu/libigdmd.so"
+    echo "          if the unversioned symlink is missing)"
+    fail=1
+  fi
+
+  # 6c. Xe driver warning — VTune 2025.x GPU-Hotspots does not fully support
+  # the xe kernel driver (BMG/Xe2, Lunar Lake). Collection may run but produce
+  # empty "Hottest GPU Computing Tasks" tables. Not a hard failure.
+  if readlink /sys/class/drm/renderD128/device/driver 2>/dev/null | grep -q '/xe$'; then
+    echo "  [WARN] GPU uses the 'xe' kernel driver."
+    echo "         VTune 2025.x GPU-Hotspots was validated on i915; on xe the"
+    echo "         per-kernel GPU Time table can come back empty. Consider"
+    echo "         unitrace for BMG kernel attribution until VTune 2026+ ships"
+    echo "         xe-native support."
   fi
 
   # 7. Nothing already on $PORT
