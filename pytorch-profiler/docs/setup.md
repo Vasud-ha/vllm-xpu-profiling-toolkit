@@ -6,21 +6,45 @@ the version actually running (`vllm --version`).
 
 ---
 
-## 1. The single required env var
+## 1. Enabling the profiler
+
+The gate changed at vLLM 0.17. Pick the right one for the build you're running.
+
+### vLLM >= 0.17 — `--profiler-config` CLI arg (current)
+
+```bash
+TRACE_DIR=/abs/path/to/trace_dir
+mkdir -p "$TRACE_DIR"
+
+vllm serve <model> \
+  --profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$TRACE_DIR\",\"torch_profiler_use_gzip\":true}"
+```
+
+`ProfilerConfig` fields you can toggle in the same JSON blob:
+`torch_profiler_with_stack` (default true), `torch_profiler_with_flops`,
+`torch_profiler_use_gzip`, `torch_profiler_record_shapes`,
+`torch_profiler_with_memory`, `ignore_frontend`, `delay_iterations`,
+`max_iterations`. Full schema: `vllm/config/profiler.py`.
+
+### vLLM <= 0.14 — `VLLM_TORCH_PROFILER_DIR` env var (legacy)
 
 ```bash
 export VLLM_TORCH_PROFILER_DIR=/abs/path/to/trace_dir
 mkdir -p "$VLLM_TORCH_PROFILER_DIR"
 ```
 
-Rules:
+On vLLM >= 0.17 this env var is silently ignored (`Unknown vLLM environment
+variable detected: VLLM_TORCH_PROFILER_DIR` in the server log). `run_pt_profile_vllm.sh`
+sets both — env var and CLI arg — so it works either way.
 
-- Must be set **before** `vllm serve` / `LLM(...)` / `AsyncLLMEngine.from_engine_args` runs.
+### Rules (both mechanisms)
+
+- Must be set/passed **before** `vllm serve` / `LLM(...)` / `AsyncLLMEngine.from_engine_args` runs.
 - Must be writable by the server process (watch for Docker uid mismatch).
 - One directory holds **all** ranks' traces in tensor-parallel runs;
   filenames disambiguate by hostname/PID/rank.
 
-If unset, all of the following silently no-op:
+If neither is provided, all of the following silently no-op / 404:
 
 - `POST /start_profile`, `POST /stop_profile` HTTP endpoints
 - `LLM.start_profile()` / `LLM.stop_profile()`
@@ -34,12 +58,19 @@ If unset, all of the following silently no-op:
 ### 2.1 OpenAI-compatible server
 
 ```bash
-export VLLM_TORCH_PROFILER_DIR=$HOME/vllm_profile
+# vLLM >= 0.17
+TRACE_DIR=$HOME/vllm_profile
+mkdir -p "$TRACE_DIR"
 vllm serve <model> \
   --enforce-eager \
   --max-num-seqs 32 \
   --max-num-batched-tokens 8192 \
-  --gpu-memory-utilization 0.85
+  --gpu-memory-utilization 0.85 \
+  --profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$TRACE_DIR\",\"torch_profiler_use_gzip\":true}"
+
+# vLLM <= 0.14 (legacy)
+# export VLLM_TORCH_PROFILER_DIR=$HOME/vllm_profile
+# vllm serve <model> --enforce-eager ...
 ```
 
 Profile control:
@@ -54,7 +85,9 @@ curl -X POST http://localhost:8000/stop_profile
 
 `vllm bench serve` (formerly `benchmark_serving.py`) calls
 `/start_profile` and `/stop_profile` for you when `--profile` is passed.
-The server **must** have been started with `VLLM_TORCH_PROFILER_DIR` set.
+The server **must** have been started with the profiler enabled —
+`--profiler-config` on vLLM >= 0.17 or `VLLM_TORCH_PROFILER_DIR` on <= 0.14 —
+otherwise `--profile` is a no-op.
 
 ```bash
 vllm bench serve \
@@ -80,12 +113,24 @@ Tips:
 ## 3. Offline `LLM` API
 
 ```python
-import os
-os.environ["VLLM_TORCH_PROFILER_DIR"] = "/abs/path"
-
+# vLLM >= 0.17 — preferred: pass ProfilerConfig
 from vllm import LLM, SamplingParams
+from vllm.config import ProfilerConfig
 
-llm = LLM(model=..., enforce_eager=True)
+llm = LLM(
+    model=...,
+    enforce_eager=True,
+    profiler_config=ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir="/abs/path",
+    ),
+)
+
+# vLLM <= 0.14 legacy — env var still honored
+# import os
+# os.environ["VLLM_TORCH_PROFILER_DIR"] = "/abs/path"
+# from vllm import LLM
+# llm = LLM(model=..., enforce_eager=True)
 
 # 1. Warmup OUTSIDE the profile
 llm.generate(["warmup"] * 4, SamplingParams(max_tokens=8))
@@ -183,7 +228,8 @@ If the GPU lane is empty in Perfetto, almost always one of:
 Cheap pre-checks before opening a multi-hundred-MB file:
 
 ```bash
-ls -lh "$VLLM_TORCH_PROFILER_DIR"
+TRACE_DIR=<the dir you passed to --profiler-config or exported as VLLM_TORCH_PROFILER_DIR>
+ls -lh "$TRACE_DIR"
 # Plausible: tens to low-hundreds of MB per rank for a tight ROI.
 
 # Peek at the JSON header (first event names):
@@ -193,7 +239,7 @@ with open(sys.argv[1]) as f:
     head = f.read(200_000)
 # Trace JSON is a single object with traceEvents; the header has metadata.
 print(head[:2000])
-" "$VLLM_TORCH_PROFILER_DIR"/<file>.pt.trace.json
+" "$TRACE_DIR"/<file>.pt.trace.json
 ```
 
 If the file is `.json.gz`, `zcat | head -c 200000` instead.

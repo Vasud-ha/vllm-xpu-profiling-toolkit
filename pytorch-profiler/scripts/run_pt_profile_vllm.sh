@@ -19,8 +19,13 @@ set -euo pipefail
 #
 #   3. ROI = vLLM's official /start_profile + /stop_profile endpoints. We
 #      drive them around a tight benchmark window so model load, warmup and
-#      drain are excluded. VLLM_TORCH_PROFILER_DIR MUST be set before the
-#      server starts; otherwise the endpoints are no-ops.
+#      drain are excluded.
+#
+#      vLLM >= 0.17 replaced the VLLM_TORCH_PROFILER_DIR env var with a
+#      `--profiler-config` CLI arg holding a ProfilerConfig JSON blob
+#      (`{"profiler":"torch","torch_profiler_dir":"<abs path>"}`). On older
+#      builds set both — env var for < 0.17, CLI arg for >= 0.17 — so the
+#      wrapper works either way. Without one of them, /start_profile 404s.
 #
 # After collection, summarize.py walks the trace and prints step cadence,
 # forward fraction, top kernels, etc. (validation cribbed from
@@ -61,9 +66,12 @@ if [[ ! -f "$WRAPPER" ]]; then
   exit 1
 fi
 
-# vLLM reads VLLM_TORCH_PROFILER_DIR at engine init; export NOW so the child
-# process sees it. The dir is a single shared output sink for all ranks.
-export VLLM_TORCH_PROFILER_DIR="$RESULT_DIR/torch_traces"
+# vLLM <= 0.14 reads VLLM_TORCH_PROFILER_DIR at engine init; vLLM >= 0.17
+# reads --profiler-config instead. We set both so the wrapper works on any
+# supported release. The dir is a single shared output sink for all ranks.
+TORCH_TRACE_DIR="$RESULT_DIR/torch_traces"
+export VLLM_TORCH_PROFILER_DIR="$TORCH_TRACE_DIR"      # <= 0.14 gate
+PROFILER_CONFIG_JSON="{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$TORCH_TRACE_DIR\",\"torch_profiler_use_gzip\":true}"
 export PT_PHASE
 export PT_LABEL_EVERY_STEP
 
@@ -109,12 +117,12 @@ preflight() {
   fi
 
   # 3. profiler dir is writable
-  mkdir -p "$VLLM_TORCH_PROFILER_DIR" 2>/dev/null || true
-  if [[ ! -w "$VLLM_TORCH_PROFILER_DIR" ]]; then
-    echo "  [FAIL] $VLLM_TORCH_PROFILER_DIR not writable"
+  mkdir -p "$TORCH_TRACE_DIR" 2>/dev/null || true
+  if [[ ! -w "$TORCH_TRACE_DIR" ]]; then
+    echo "  [FAIL] $TORCH_TRACE_DIR not writable"
     fail=1
   else
-    echo "  [ OK ] profiler dir writable: $VLLM_TORCH_PROFILER_DIR"
+    echo "  [ OK ] profiler dir writable: $TORCH_TRACE_DIR"
   fi
 
   # 4. Free disk
@@ -145,7 +153,7 @@ preflight() {
   return $fail
 }
 
-mkdir -p "$RESULT_ROOT" "$VLLM_TORCH_PROFILER_DIR"
+mkdir -p "$RESULT_ROOT" "$TORCH_TRACE_DIR"
 echo "===== Pre-flight checks ====="
 if ! preflight; then
   echo "Pre-flight checks FAILED. Refusing to start."
@@ -176,7 +184,7 @@ cat > "$RESULT_DIR/metadata.json" <<META
   "drain_seconds": $DRAIN_SECONDS,
   "host": "$HOST",
   "port": $PORT,
-  "torch_profiler_dir": "$VLLM_TORCH_PROFILER_DIR",
+  "torch_profiler_dir": "$TORCH_TRACE_DIR",
   "started_at": "$(date -Iseconds)"
 }
 META
@@ -192,6 +200,7 @@ python "$WRAPPER" \
       --dtype "$DTYPE" \
       --max-model-len "$MAX_MODEL_LEN" \
       --gpu-memory-utilization "$GPU_MEM_UTIL" \
+      --profiler-config "$PROFILER_CONFIG_JSON" \
       "${EXTRA_ARGS[@]}" \
       > "$RESULT_DIR/server.log" 2>&1 &
 SERVER_PID=$!
@@ -236,7 +245,9 @@ sleep "$DRAIN_SECONDS"
 # ---- Step 4: /start_profile -> Benchmark -> /stop_profile ----
 echo "Starting torch profiler ..."
 if ! curl -sf -X POST "http://$HOST:$PORT/start_profile" > "$RESULT_DIR/start_profile.log" 2>&1; then
-  echo "ERROR: /start_profile failed. Did VLLM_TORCH_PROFILER_DIR get set BEFORE server start?"
+  echo "ERROR: /start_profile failed. On vLLM >= 0.17 this usually means the"
+  echo "       --profiler-config CLI arg was rejected or missing; on <= 0.14"
+  echo "       it means VLLM_TORCH_PROFILER_DIR wasn't set before server start."
   echo "       See $RESULT_DIR/start_profile.log and $RESULT_DIR/server.log"
   exit 1
 fi
@@ -277,12 +288,13 @@ wait "$SERVER_PID" 2>/dev/null || true
 echo
 echo "===== Trace inventory ====="
 shopt -s nullglob
-TRACES=("$VLLM_TORCH_PROFILER_DIR"/*.pt.trace.json* "$VLLM_TORCH_PROFILER_DIR"/*.json.gz)
+TRACES=("$TORCH_TRACE_DIR"/*.pt.trace.json* "$TORCH_TRACE_DIR"/*.json.gz)
 shopt -u nullglob
 if [[ ${#TRACES[@]} -eq 0 ]]; then
-  echo "  [FAIL] no trace files found in $VLLM_TORCH_PROFILER_DIR"
+  echo "  [FAIL] no trace files found in $TORCH_TRACE_DIR"
   echo "         Common causes:"
-  echo "           - VLLM_TORCH_PROFILER_DIR set AFTER server start"
+  echo "           - --profiler-config missing/malformed at server start (vLLM >= 0.17)"
+  echo "           - VLLM_TORCH_PROFILER_DIR set AFTER server start (vLLM <= 0.14)"
   echo "           - /start_profile returned 404 (endpoint missing on this build)"
   echo "           - Server crashed before /stop_profile flushed"
   echo "         See $RESULT_DIR/server.log and $RESULT_DIR/start_profile.log"
@@ -297,7 +309,7 @@ done
 echo
 echo "===== Quick summary ====="
 if [[ -f "$SUMMARIZE" ]]; then
-  python "$SUMMARIZE" "$VLLM_TORCH_PROFILER_DIR" \
+  python "$SUMMARIZE" "$TORCH_TRACE_DIR" \
        --bench-elapsed "$BENCH_ELAPSED" \
     | tee "$RESULT_DIR/summary.txt"
 else

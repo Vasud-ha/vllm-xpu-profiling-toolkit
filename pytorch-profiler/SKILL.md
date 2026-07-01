@@ -51,13 +51,18 @@ vLLM exposes profiling through **three layers**, all backed by `torch.profiler`:
 
 | Layer | Entry point | When to use |
 |------|-------------|-------------|
-| Env-var gated server | `VLLM_TORCH_PROFILER_DIR=/path` | Always-on profile endpoint on `vllm serve` |
+| CLI-gated server (vLLM >= 0.17) | `--profiler-config '{"profiler":"torch","torch_profiler_dir":"/abs/path"}'` | Current path — required for `/start_profile` route to register |
+| Env-var gated server (vLLM <= 0.14) | `VLLM_TORCH_PROFILER_DIR=/path` | Legacy path — silently no-ops on >= 0.17 |
 | Programmatic | `LLM.start_profile()` / `LLM.stop_profile()` (offline) and `AsyncLLMEngine.start_profile()` / `stop_profile()` (online) | Offline scripts / custom drivers |
-| Bench-driven | `vllm bench serve --profile ...` (after `VLLM_TORCH_PROFILER_DIR` is set) | Reproducible end-to-end captures |
+| Bench-driven | `vllm bench serve --profile ...` (after the server is started with one of the gates above) | Reproducible end-to-end captures |
 
-> Setting `VLLM_TORCH_PROFILER_DIR` is **required** before the server/engine
-> starts. The endpoints/methods are no-ops without it. This is the single most
-> common "my profile is empty" cause.
+> **vLLM 0.17 changed the profiler gate.** The env-var `VLLM_TORCH_PROFILER_DIR`
+> is silently ignored on modern builds — you now pass a `ProfilerConfig` JSON
+> via `--profiler-config`. Symptom on 0.17 with only the env var: server logs
+> `Unknown vLLM environment variable detected: VLLM_TORCH_PROFILER_DIR`, and
+> `curl -X POST /start_profile` returns 404 because the profile router only
+> attaches when `profiler_config.profiler is not None`. `run_pt_profile_vllm.sh`
+> sets both — env var and CLI arg — so it works either way.
 
 The worker loop is decorated so each `execute_model` step lands in the
 trace as its own block. With `--enforce-eager` you get readable kernel
@@ -71,14 +76,20 @@ names; with CUDA graphs / `torch.compile` enabled you'll see fused
 ### A. Server + bench (recommended)
 
 ```bash
-# Terminal 1 — start server with profiler dir set
-export VLLM_TORCH_PROFILER_DIR=$HOME/vllm_profile
-mkdir -p "$VLLM_TORCH_PROFILER_DIR"
+# Terminal 1 — start server with the profiler configured.
+# vLLM >= 0.17: pass --profiler-config with a JSON ProfilerConfig.
+TRACE_DIR="$HOME/vllm_profile"
+mkdir -p "$TRACE_DIR"
 
 vllm serve meta-llama/Llama-3.1-8B-Instruct \
   --enforce-eager \
   --max-num-seqs 32 \
-  --max-num-batched-tokens 8192
+  --max-num-batched-tokens 8192 \
+  --profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$TRACE_DIR\",\"torch_profiler_use_gzip\":true}"
+
+# vLLM <= 0.14 (legacy): use the env var instead
+# export VLLM_TORCH_PROFILER_DIR="$TRACE_DIR"
+# vllm serve meta-llama/Llama-3.1-8B-Instruct --enforce-eager ...
 
 # Terminal 2 — drive a controlled workload and trigger profiling around it
 vllm bench serve \
@@ -91,7 +102,7 @@ vllm bench serve \
 
 `--profile` calls the server's `/start_profile` before the run and
 `/stop_profile` after. Trace `.pt.trace.json` (sometimes `.json.gz`)
-files appear in `$VLLM_TORCH_PROFILER_DIR`.
+files appear in the configured `torch_profiler_dir`.
 
 ### B. HTTP endpoints directly
 
@@ -105,9 +116,16 @@ curl -X POST http://localhost:8000/stop_profile
 
 ```python
 import os
+# vLLM <= 0.14: env var still honored offline.
+# vLLM >= 0.17: pass profiler_config directly to LLM(...) instead.
 os.environ["VLLM_TORCH_PROFILER_DIR"] = "/home/me/vllm_profile"
 
 from vllm import LLM, SamplingParams
+# On 0.17+, prefer:
+#   from vllm.config import ProfilerConfig
+#   llm = LLM(model=..., enforce_eager=True,
+#             profiler_config=ProfilerConfig(profiler="torch",
+#                                            torch_profiler_dir="/home/me/vllm_profile"))
 llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", enforce_eager=True)
 
 # Warmup OUTSIDE the profile window
@@ -191,7 +209,8 @@ spec-decode shape, NCCL overhead).
 
 ## 6. Sanity Checks Before You Trust a Trace
 
-- `VLLM_TORCH_PROFILER_DIR` was set **before** the server/engine started.
+- Profiler was configured **before** the server/engine started, via
+  `--profiler-config` (vLLM >= 0.17) or `VLLM_TORCH_PROFILER_DIR` (vLLM <= 0.14).
 - A warmup ran **before** `start_profile`.
 - ROI is bounded — you stopped profiling, you didn't ctrl-C the process.
 - File size is plausible (tens to a few hundred MB, not multi-GB unless intentional).

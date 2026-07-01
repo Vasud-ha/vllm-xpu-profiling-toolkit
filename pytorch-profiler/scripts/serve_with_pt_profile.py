@@ -19,8 +19,13 @@ Phase classification mirrors serve_with_vtune.py:
   prefill | decode | mixed | cache_hit | empty
 
 Environment variables (read at process start):
-  VLLM_TORCH_PROFILER_DIR  REQUIRED. Without it, /start_profile is a no-op.
-                           Set by run_pt_profile_vllm.sh before exec.
+  VLLM_TORCH_PROFILER_DIR  vLLM <= 0.14 profiler gate. Read at engine init.
+                           Ignored on vLLM >= 0.17, which uses the
+                           `--profiler-config` CLI arg with a ProfilerConfig
+                           JSON blob (e.g. `{"profiler":"torch",
+                           "torch_profiler_dir":"/abs/path"}`). Either mechanism
+                           must be provided by the launcher (run_pt_profile_vllm.sh
+                           sets both) or /start_profile 404s.
   PT_PHASE                 prefill | decode | mixed | both  (default: both)
                            Controls which phases get a record_function span.
                            Steps not in the selected phase still execute, they
@@ -49,14 +54,26 @@ log = logging.getLogger("pt.vllm")
 # ---------- Environment surface ----------
 
 PROFILE_DIR = os.environ.get("VLLM_TORCH_PROFILER_DIR", "").strip()
-if not PROFILE_DIR:
-    log.warning(
-        "VLLM_TORCH_PROFILER_DIR not set - /start_profile and /stop_profile "
-        "will be no-ops. Set it BEFORE launching this script."
+# vLLM >= 0.17 also accepts --profiler-config on the CLI; peek at argv so we
+# don't emit a scary "not set" warning when the launcher used the new flag.
+_has_profiler_config = any(
+    a == "--profiler-config" or a.startswith("--profiler-config=")
+    for a in sys.argv
+)
+if PROFILE_DIR:
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    log.info("VLLM_TORCH_PROFILER_DIR=%s (vLLM <= 0.14 gate)", PROFILE_DIR)
+elif _has_profiler_config:
+    log.info(
+        "Using --profiler-config CLI arg (vLLM >= 0.17 gate); "
+        "VLLM_TORCH_PROFILER_DIR unset is expected"
     )
 else:
-    os.makedirs(PROFILE_DIR, exist_ok=True)
-    log.info("VLLM_TORCH_PROFILER_DIR=%s", PROFILE_DIR)
+    log.warning(
+        "Neither VLLM_TORCH_PROFILER_DIR nor --profiler-config is set; "
+        "/start_profile and /stop_profile will 404. Pass one of them BEFORE "
+        "launching this script."
+    )
 
 PHASE = os.environ.get("PT_PHASE", "both").strip().lower()
 if PHASE not in {"prefill", "decode", "mixed", "both"}:

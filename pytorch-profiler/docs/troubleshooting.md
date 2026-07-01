@@ -8,18 +8,25 @@ Common failure modes, ordered by frequency.
 
 Checks, in order:
 
-1. `echo $VLLM_TORCH_PROFILER_DIR` in the **server's** environment
-   (not just your shell). Containers often miss it.
-2. The dir exists and the server uid can write to it
-   (`ls -ld $VLLM_TORCH_PROFILER_DIR`).
-3. `start_profile` actually returned 200/None (curl `-i` to see).
-4. Did you call `stop_profile`? The trace flush happens on stop.
-5. Did the process exit cleanly? A `SIGKILL` mid-profile loses the
+1. On vLLM >= 0.17: was `--profiler-config` passed to `vllm serve` /
+   `serve_with_pt_profile.py`? If the server log says
+   `Unknown vLLM environment variable detected: VLLM_TORCH_PROFILER_DIR`,
+   you're on 0.17+ and using the old gate — restart with `--profiler-config`.
+2. On vLLM <= 0.14: `echo $VLLM_TORCH_PROFILER_DIR` in the **server's**
+   environment (not just your shell). Containers often miss it.
+3. Check the OpenAPI spec for `/start_profile`:
+   `curl -s localhost:PORT/openapi.json | python -c 'import json,sys; print([p for p in json.load(sys.stdin)["paths"] if "profile" in p])'`
+   Empty → the profile router didn't attach (profiler wasn't configured at
+   server start). Non-empty → the profiler is wired; move to step 4.
+4. The trace dir exists and the server uid can write to it (`ls -ld <dir>`).
+5. `start_profile` actually returned 200/None (curl `-i` to see).
+6. Did you call `stop_profile`? The trace flush happens on stop.
+7. Did the process exit cleanly? A `SIGKILL` mid-profile loses the
    buffer. Use `SIGTERM` or the HTTP endpoint.
 
-If env var was set late (after the engine started), restart the
-server. There's no runtime way to point the profiler at a directory
-the engine never knew about.
+If the profiler wasn't configured at server start, restart the server.
+There's no runtime way to point the profiler at a directory the engine
+never knew about.
 
 ---
 
@@ -95,10 +102,15 @@ To shrink a trace at capture time:
 
 Either:
 
-- `VLLM_TORCH_PROFILER_DIR` was unset → endpoints are not registered.
+- On vLLM >= 0.17: `--profiler-config` was not passed → the profile router
+  in `vllm/entrypoints/serve/profile/api_router.py` only calls
+  `app.include_router(router)` when `profiler_config.profiler is not None`,
+  so `/start_profile` isn't registered. Restart with a valid
+  `ProfilerConfig` JSON.
+- On vLLM <= 0.14: `VLLM_TORCH_PROFILER_DIR` was unset → endpoints are not registered.
 - vLLM build is too old / too new — endpoint path may have moved.
-  `vllm serve --help` and check the API spec; older builds used
-  `/v1/profile/start` style paths.
+  `vllm serve --help=all` and check the OpenAPI spec (`GET /openapi.json`);
+  older builds used `/v1/profile/start` style paths.
 
 Workaround: switch to programmatic `LLM.start_profile()` /
 `AsyncLLMEngine.start_profile()` from a sidecar script, or
