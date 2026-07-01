@@ -22,12 +22,12 @@ pass() { echo "  ${G}[PASS]${N} $1"; }
 warn() { echo "  ${Y}[WARN]${N} $1"; }
 fail() { echo "  ${R}[FAIL]${N} $1"; FAILURES=$((FAILURES+1)); }
 info() { echo "  ${C}[INFO]${N} $1"; }
-head() { echo; echo "${B}== $1 ==${N}"; }
+section() { echo; echo "${B}== $1 ==${N}"; }
 
 FAILURES=0
 
 # ---- Section 1: common prerequisites ----
-head "Common (all three skills)"
+section "Common (all three skills)"
 
 # Python
 if command -v python >/dev/null 2>&1; then
@@ -79,7 +79,7 @@ else
 fi
 
 # ---- Section 2: VTune skill ----
-head "VTune skill (vtune/scripts/run_vtune_vllm.sh)"
+section "VTune skill (vtune/scripts/run_vtune_vllm.sh)"
 
 if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
   source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
@@ -116,7 +116,7 @@ elif readlink /sys/class/drm/renderD128/device/driver 2>/dev/null | grep -q '/i9
 fi
 
 # ---- Section 3: unitrace skill ----
-head "unitrace skill (unitrace/scripts/run_unitrace_vllm.sh)"
+section "unitrace skill (unitrace/scripts/run_unitrace_vllm.sh)"
 
 UT=""
 for CAND in "${UNITRACE_BIN:-}" \
@@ -138,7 +138,7 @@ else
 fi
 
 # ---- Section 4: PyTorch-profiler skill ----
-head "PyTorch-profiler skill (pytorch-profiler/scripts/run_pt_profile_vllm.sh)"
+section "PyTorch-profiler skill (pytorch-profiler/scripts/run_pt_profile_vllm.sh)"
 
 if python -c 'from vllm.config import ProfilerConfig' 2>/dev/null; then
   pass "ProfilerConfig importable (vLLM >= 0.17 CLI-arg gate available)"
@@ -149,7 +149,7 @@ else
 fi
 
 # ---- Summary ----
-head "Summary"
+section "Summary"
 
 if [[ $FAILURES -eq 0 ]]; then
   echo "  ${G}${B}All checks passed.${N} The three run_*_vllm.sh wrappers should work end-to-end."
