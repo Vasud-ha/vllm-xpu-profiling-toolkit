@@ -193,7 +193,6 @@ python "$WRAPPER" \
       --max-model-len "$MAX_MODEL_LEN" \
       --gpu-memory-utilization "$GPU_MEM_UTIL" \
       "${EXTRA_ARGS[@]}" \
-      --disable-log-requests \
       > "$RESULT_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 

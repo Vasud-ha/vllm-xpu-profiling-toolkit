@@ -24,6 +24,13 @@ GPU-Hotspots on Intel Xe; this skill covers vLLM's **official PyTorch-profiler
 based** flow and Perfetto/chrome-tracing analysis (vendor-agnostic, works on
 NVIDIA CUDA and Intel XPU builds).
 
+> **Version note (July 2026).** vLLM 0.17+ removed `--disable-log-requests`;
+> request logging is off by default and the toggle is now
+> `--enable-log-requests` / `--no-enable-log-requests`. Both `run_pt_profile_vllm.sh`
+> and the quick-start recipes below have been updated. If you're on an older
+> build (<= 0.14.x), you can add `--no-enable-log-requests` back — the wrapper
+> forwards unknown flags to the api_server unchanged via `runpy`.
+
 Authoritative reference: <https://docs.vllm.ai/en/stable/contributing/profiling/profiling_index.html>
 
 ---

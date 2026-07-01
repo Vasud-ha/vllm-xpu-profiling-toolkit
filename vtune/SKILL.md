@@ -15,6 +15,17 @@ description: >
 
 # VTune Conditional Profiling for vLLM on Intel Xe GPU
 
+> **Prerequisite: VTune Profiler is a separate install.** The oneAPI Base
+> Toolkit alone (`/opt/intel/oneapi/` with `compiler`, `mkl`, `pti`, etc.) does
+> NOT include VTune. If `command -v vtune` returns nothing after
+> `source /opt/intel/oneapi/setvars.sh`, install the VTune Profiler package
+> separately (e.g. `apt install intel-oneapi-vtune` or the standalone
+> installer). `run_vtune_vllm.sh` fails preflight with the same hint.
+>
+> Validated on `intel/vllm:0.17.0-xpu` (vLLM 0.1.dev14456+gde3f7fe65, torch
+> 2.10) with oneAPI 2025.3 base kit + VTune installed alongside. Verified
+> against `intel/vllm:0.14.1-xpu` at repo genesis; both v1 Worker paths hold.
+
 ## How to Use This Skill
 
 - **This file** — architecture, cheat sheet reference, quick-start commands, workflow
@@ -362,7 +373,10 @@ vtune -collect gpu-hotspots \
       -knob collect-programming-api=true \
       -result-dir $RESULT_DIR \
       -- python -m vllm.entrypoints.openai.api_server \
-           --model $MODEL --port $PORT --disable-log-requests &
+           --model $MODEL --port $PORT &
+#   NOTE: vLLM >= 0.17 removed --disable-log-requests. Request logging is off
+#   by default now; pass --enable-log-requests / --no-enable-log-requests only
+#   if you need to override it explicitly.
 
 # Step 2: Wait for server ready
 until curl -sf http://localhost:$PORT/health > /dev/null; do sleep 2; done
@@ -481,9 +495,11 @@ vtune -report hw-events -r $RESULT_DIR \
       -group-by computing-task \
       -format csv -limit 25 > $RESULT_DIR/hw-events.csv
 
-# Phase breakdown when ITT tasks were emitted (see vllm-integration.md §3)
-vtune -report tasks -r $RESULT_DIR \
-      -group-by task -format csv > $RESULT_DIR/tasks.csv
+# Phase breakdown when ITT tasks were emitted (see vllm-integration.md §3).
+# NOTE: `-report tasks` was renamed to `-report top-tasks` in VTune 2026.
+# Use `top-tasks` on 2026+; use `tasks` on 2024.x / 2025.x.
+vtune -report top-tasks -r $RESULT_DIR \
+      -format csv > $RESULT_DIR/tasks.csv
 ```
 
 ### 11.2 Baseline vs. candidate diff

@@ -661,6 +661,8 @@ vtune -collect gpu-hotspots -start-paused -result-dir ./out \
   -- python -m vllm.entrypoints.openai.api_server \
        --model meta-llama/Llama-3-8B \
        --max-num-seqs 1 \
-       --disable-log-requests \
        --port 8000
+# NOTE: --disable-log-requests was removed in vLLM >= 0.17 (log-requests
+# defaults to off). Use --no-enable-log-requests only if you need to
+# force-disable it on an older build.
 ```

@@ -25,7 +25,7 @@ description: >
 - **`references/itt-resolution.md`** — why ITT symbols come from `libunitrace_tool.so` (not `libittnotify.so`) when running under unitrace
 - **`references/output-and-analysis.md`** — Chrome trace JSON layout, device-timing summary, healthy ROI heuristics, Perfetto loading
 
-Developed and validated on an Intel Xe (BMG-class) GPU host running `intel/vllm:0.14.1-xpu` with vLLM `0.1.dev14456+gde3f7fe65`, oneAPI 2025.3, and kernel 6.17.
+Developed and validated on an Intel Xe (BMG-class) GPU host running `intel/vllm:0.14.1-xpu` (vLLM `0.1.dev14456+gde3f7fe65`, oneAPI 2025.3, kernel 6.17). Re-validated on `intel/vllm:0.17.0-xpu` in July 2026 — scripts and ITT resolution unchanged; only the shared-host `UNITRACE_BIN` default was extended to auto-detect a `/data/workspace/*/pti-gpu/...` build.
 
 ---
 

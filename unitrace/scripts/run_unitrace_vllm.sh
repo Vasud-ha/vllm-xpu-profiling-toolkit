@@ -26,7 +26,26 @@ BLOCK_SIZE="${BLOCK_SIZE:-64}"
 TP_SIZE="${TP_SIZE:-1}"
 DOWNLOAD_DIR="${DOWNLOAD_DIR:-/hf_cache}"
 
+# unitrace binary. Override via env: UNITRACE_BIN=/path/to/unitrace
+# Common install locations (searched in order if UNITRACE_BIN is unset):
+#   /opt/pti-gpu/tools/unitrace/build/unitrace         (upstream instructions)
+#   /data/workspace/*/pti-gpu/tools/unitrace/build/unitrace  (shared host build)
+if [[ -z "${UNITRACE_BIN:-}" ]]; then
+  for _cand in \
+    /opt/pti-gpu/tools/unitrace/build/unitrace \
+    /data/workspace/*/pti-gpu/tools/unitrace/build/unitrace \
+    "$HOME/pti-gpu/tools/unitrace/build/unitrace"; do
+    if [[ -x "$_cand" ]]; then UNITRACE_BIN="$_cand"; break; fi
+  done
+fi
 UNITRACE_BIN="${UNITRACE_BIN:-/opt/pti-gpu/tools/unitrace/build/unitrace}"
+if [[ ! -x "$UNITRACE_BIN" ]]; then
+  echo "ERROR: unitrace binary not found at UNITRACE_BIN=$UNITRACE_BIN" >&2
+  echo "       Build it from https://github.com/intel/pti-gpu (tools/unitrace)," >&2
+  echo "       then re-run with UNITRACE_BIN=<path> $0" >&2
+  exit 1
+fi
+
 RESULT_ROOT="${RESULT_ROOT:-$PWD/unitrace_results}"
 RESULT_DIR="$RESULT_ROOT/$(date +%Y%m%d_%H%M%S)_$(echo "${MODEL}" | tr '/' '_')"
 mkdir -p "$RESULT_DIR"

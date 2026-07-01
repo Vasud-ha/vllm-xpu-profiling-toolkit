@@ -96,7 +96,11 @@ preflight() {
 
   # 1. vtune in PATH
   if ! command -v vtune >/dev/null 2>&1; then
-    echo "  [FAIL] vtune not in PATH (source /opt/intel/oneapi/setvars.sh)"
+    echo "  [FAIL] vtune not in PATH"
+    echo "         The oneAPI Base Toolkit alone does NOT include VTune Profiler."
+    echo "         Install it from https://www.intel.com/content/www/us/en/developer/tools/oneapi/vtune-profiler-download.html"
+    echo "         (or 'apt install intel-oneapi-vtune'). Then:"
+    echo "           source /opt/intel/oneapi/setvars.sh --force"
     fail=1
   else
     echo "  [ OK ] vtune: $(command -v vtune)"
@@ -230,8 +234,7 @@ vtune -collect gpu-hotspots \
             --dtype "$DTYPE" \
             --max-model-len "$MAX_MODEL_LEN" \
             --gpu-memory-utilization "$GPU_MEM_UTIL" \
-            "${EXTRA_ARGS[@]}" \
-            --disable-log-requests &
+            "${EXTRA_ARGS[@]}" &
 VTUNE_PID=$!
 
 cleanup() {
