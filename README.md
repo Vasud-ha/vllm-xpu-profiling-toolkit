@@ -10,6 +10,9 @@ Profiling recipes, wrapper scripts, and analysis notes for **vLLM serving on Int
 
 All three share the same **ROI-gated collection pattern**: instead of profiling the full vLLM serve run, the wrapper toggles the collector on only during a specific phase (prefill / decode / a particular request range) so the resulting trace stays small and the overhead doesn't perturb the steady state.
 
+For a **side-by-side comparison** of what each profiler sees, when to reach for each, and how to combine them, see
+[`profiler_comparison_report.html`](./profiler_comparison_report.html) — clone the repo and open the file directly in your browser (GitHub renders raw HTML as text, not as a rendered page).
+
 ## Layout
 
 Each profiler folder follows the same shape:
