@@ -32,13 +32,37 @@ or clone the repo and run `./scripts/check_prereqs.sh` locally.
 
 ## 2. VTune skill (vtune/)
 
-Beyond the base container:
+VTune Profiler is a separate install — the oneAPI Base Toolkit alone does
+NOT include it. Pick one of the two install paths:
+
+### 2.a Standalone Intel installer (recommended; needed for VTune 2026.x on BMG)
+
+Download the Linux offline installer directly from Intel:
+
+<https://www.intel.com/content/www/us/en/developer/tools/oneapi/vtune-profiler-download.html?operatingsystem=linux&linux-install-type=offline>
+
+Then run the `.sh` installer as root. This gives you the latest release
+(2026.x as of writing) — which is what BMG needs (see the BMG note
+below). Re-source `setvars.sh` after install so `vtune` lands on PATH:
 
 ```bash
-# Install VTune Profiler (Base Toolkit alone does NOT include it).
-# ~547 MB download; adds vtune to PATH after re-sourcing setvars.sh.
-apt install -y intel-oneapi-vtune
+source /opt/intel/oneapi/setvars.sh --force
+vtune --version   # sanity check
+```
 
+### 2.b apt (older versions only, currently 2025.x)
+
+Only use this if you're OK with an older VTune release. The apt repo
+lagged 2026.x for a while — check `apt-cache policy intel-oneapi-vtune`
+before choosing this path.
+
+```bash
+apt install -y intel-oneapi-vtune
+```
+
+### Common to both paths — extras VTune needs
+
+```bash
 # Intel Metrics Discovery library (libigdmd.so + libmd.so).
 # VTune's gpu-hotspots / gpu-offload dlopen this at collect time.
 apt install -y intel-metrics-discovery
@@ -53,15 +77,13 @@ ldconfig
 pip install ittapi
 ```
 
-**BMG requires VTune 2026.0.** VTune 2025.x fails on BMG with
+**BMG requires VTune 2026.0 or newer.** VTune 2025.x fails on BMG with
 `Cannot collect GPU hardware metrics because neither libigdmd.so nor libmd.so
 was found` — even with `intel-metrics-discovery` installed and the
 unversioned `libigdmd.so` symlink in place. Confirmed working on VTune
-2026.0 against the same BMG hardware (prior runs). VTune 2026.0 is not in
-the Intel apt repo as of writing — install it via the standalone Intel
-installer from
-<https://www.intel.com/content/www/us/en/developer/tools/oneapi/vtune-profiler-download.html>
-or use **unitrace** for BMG kernel attribution.
+2026.0 against the same BMG hardware (prior runs). Use the standalone
+installer above (path 2.a) if the apt repo doesn't offer 2026.x yet, or
+fall back to **unitrace** for BMG kernel attribution.
 
 ---
 

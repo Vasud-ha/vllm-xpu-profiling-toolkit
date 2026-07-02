@@ -26,6 +26,14 @@ section() { echo; echo "${B}== $1 ==${N}"; }
 
 FAILURES=0
 
+# Source oneAPI setvars.sh up-front. On intel/vllm >= 0.21 images the runtime
+# libs (libccl.so.1, MPI, MKL) live under /opt/intel/oneapi/ and torch's
+# import chain won't find them unless setvars is sourced. Without this,
+# every `python -c "import torch"` below would false-FAIL.
+if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
+  source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
+fi
+
 # ---- Section 1: common prerequisites ----
 section "Common (all three skills)"
 

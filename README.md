@@ -74,7 +74,7 @@ caveats — in [`PREREQUISITES.md`](./PREREQUISITES.md). At a glance:
 - Intel oneAPI Base Toolkit ≥ 2025.x (preinstalled in `intel/vllm:*-xpu`)
 - `intel/vllm:*-xpu` container ≥ 0.14.1-xpu (validated on 0.17.0-xpu)
 - A discrete Intel GPU (BMG / Arc / Max) with a recent Level Zero driver
-- **VTune skill only:** `apt install intel-oneapi-vtune intel-metrics-discovery`, plus the `libigdmd.so` symlink and `pip install ittapi`
+- **VTune skill only:** install Intel VTune Profiler (recommend the standalone Linux offline installer from [Intel's download page](https://www.intel.com/content/www/us/en/developer/tools/oneapi/vtune-profiler-download.html?operatingsystem=linux&linux-install-type=offline) — BMG needs VTune 2026.0+, which the apt repo may lag), plus `apt install intel-metrics-discovery`, the `libigdmd.so` symlink, and `pip install ittapi`
 - **unitrace skill only:** a local build of [intel/pti-gpu](https://github.com/intel/pti-gpu) → `tools/unitrace` (see `unitrace/SKILL.md` §2)
 
 Verify a machine before invoking any wrapper:
@@ -87,7 +87,7 @@ Prints a PASS/WARN/FAIL per skill and exits non-zero on any FAIL.
 
 ## Known limitations
 
-- **VTune GPU-Hotspots on BMG needs VTune 2026.0.** VTune 2025.x (the
+- **VTune GPU-Hotspots on BMG needs VTune 2026.0 or newer.** Download the [Linux offline installer from Intel](https://www.intel.com/content/www/us/en/developer/tools/oneapi/vtune-profiler-download.html?operatingsystem=linux&linux-install-type=offline) if the apt repo doesn't yet offer 2026.x. VTune 2025.x (the
   latest apt-shipped version as of writing) fails with
   `Cannot collect GPU hardware metrics because neither libigdmd.so nor libmd.so
   was found` on BMG even with `intel-metrics-discovery` installed and the
