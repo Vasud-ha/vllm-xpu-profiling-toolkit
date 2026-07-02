@@ -87,11 +87,16 @@ Prints a PASS/WARN/FAIL per skill and exits non-zero on any FAIL.
 
 ## Known limitations
 
-- **VTune GPU-Hotspots on BMG/Xe2 (`xe` kernel driver).** VTune 2025.x was
-  validated on `i915`; on `xe` the collect completes but the per-kernel
-  "Hottest GPU Computing Tasks" table is often empty. `check_prereqs.sh` and
-  `run_vtune_vllm.sh` both `[WARN]` when they detect `xe`. For BMG kernel
-  attribution, prefer the **unitrace** skill until VTune 2026+ ships xe support.
+- **VTune GPU-Hotspots on BMG needs VTune 2026.0.** VTune 2025.x (the
+  latest apt-shipped version as of writing) fails with
+  `Cannot collect GPU hardware metrics because neither libigdmd.so nor libmd.so
+  was found` on BMG even with `intel-metrics-discovery` installed and the
+  unversioned `libigdmd.so` symlink in place. VTune 2026.0 has been observed
+  to capture GPU-Hotspots successfully on the same BMG hardware (via prior
+  runs from May 2026 on host `gnr-bmg-2`). The `check_prereqs.sh` script
+  detects the VTune version installed and warns if it's < 2026.
+  Until 2026.0 lands in the apt repo, install it via the standalone Intel
+  installer or use **unitrace** for BMG kernel attribution.
 
 ## What was validated
 

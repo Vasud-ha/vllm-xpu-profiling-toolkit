@@ -193,7 +193,7 @@ Intel VTune GPU-Hotspots
   Cons:
   - Heavy install (~1-2 GB) beyond the base oneAPI toolkit.
   - Overhead higher than the other two.
-  - Not fully supported on the xe kernel driver in 2025.x (see gotchas).
+  - VTune 2025.x fails to collect GPU metrics on BMG (see gotchas); use 2026.0 or switch to unitrace.
 
 pti-gpu unitrace
   Pros:
@@ -282,11 +282,16 @@ Cross-tool gotchas on Intel Xe / Xe2
   BMG/Xe2 + recent oneAPI: pti-gpu build error    | unitrace      | Patch scripts/gen_tracing_callbacks
   ze_ipc_event_counter_based_handle_t cast        | build         | .py with the templated helper,
                                                   |               | regenerate, rebuild.
-  BMG/Xe2 (xe kernel driver) + VTune 2025.x:      | VTune         | VTune 2025.x metric-discovery was
-  "Hottest GPU Computing Tasks" comes back empty  | GPU-Hotspots  | validated on i915. Use unitrace
-                                                  | & gpu-offload | for BMG kernel attribution until
-                                                  |               | VTune 2026+ ships xe-native support.
-                                                  |               | run_vtune_vllm.sh WARNs at preflight.
+  BMG + VTune 2025.x: "Cannot collect GPU         | VTune         | VTune 2025.x is broken on BMG even
+  hardware metrics -- neither libigdmd.so nor     | GPU-Hotspots  | with intel-metrics-discovery + the
+  libmd.so was found"                             | & gpu-offload | libigdmd.so symlink. VTune 2026.0
+                                                  |               | has been observed to work on the
+                                                  |               | same BMG hardware. Until 2026.0 is
+                                                  |               | in the apt repo, use the standalone
+                                                  |               | installer, or switch to unitrace
+                                                  |               | for BMG kernel attribution.
+                                                  |               | run_vtune_vllm.sh WARNs at preflight
+                                                  |               | when the installed VTune is < 2026.
   VTune: "Cannot collect GPU hardware metrics -   | VTune         | Install intel-metrics-discovery,
   neither libigdmd.so nor libmd.so was found"     |               | then create the missing symlink:
                                                   |               |   ln -sf libigdmd.so.1 \

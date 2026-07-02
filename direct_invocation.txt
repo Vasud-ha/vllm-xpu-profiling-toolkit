@@ -92,8 +92,11 @@ Reports:
 Notes:
 - --disable-log-requests was REMOVED in vLLM >= 0.17. Do not pass it. If you
   need to force-disable request logging, use --no-enable-log-requests.
-- On BMG/Xe2 (xe kernel driver) with VTune 2025.x, "Hottest GPU Computing
-  Tasks" often comes back empty. Prefer unitrace for BMG kernel attribution.
+- On BMG, VTune 2025.x fails collection with "Cannot collect GPU hardware
+  metrics -- neither libigdmd.so nor libmd.so was found" even with the apt
+  packages installed. VTune 2026.0 has been observed to work on the same
+  BMG hardware. Until 2026.0 is available via apt, install it standalone
+  from Intel or switch to unitrace.
 - Prerequisites: apt install intel-oneapi-vtune intel-metrics-discovery,
   then ln -sf libigdmd.so.1 /usr/lib/x86_64-linux-gnu/libigdmd.so && ldconfig
   (see PREREQUISITES.md).

@@ -108,11 +108,17 @@ else
   warn "ittapi not installed — pip install ittapi (ctypes fallback used otherwise)"
 fi
 
-# xe-driver warning (BMG/Xe2/Lunar Lake)
-if readlink /sys/class/drm/renderD128/device/driver 2>/dev/null | grep -q '/xe$'; then
-  warn "GPU uses 'xe' kernel driver — VTune 2025.x gpu-hotspots may produce empty per-kernel table on BMG/Xe2 (prefer unitrace for this HW)"
-elif readlink /sys/class/drm/renderD128/device/driver 2>/dev/null | grep -q '/i915$'; then
-  pass "GPU uses 'i915' kernel driver (VTune-supported)"
+# VTune-version + BMG combo check.
+# VTune 2025.x fails to collect on BMG ("Cannot collect GPU hardware metrics
+# because neither libigdmd.so nor libmd.so was found") even with the metrics-
+# discovery package installed. VTune 2026.0 has been observed to work on the
+# same BMG hardware. Warn when both conditions match.
+if command -v vtune >/dev/null 2>&1; then
+  VTV_MAJOR=$(vtune --version 2>&1 | head -1 | grep -oE '[0-9]{4}' | head -1 || echo "0")
+  if [[ "$VTV_MAJOR" -lt 2026 ]] 2>/dev/null && \
+     readlink /sys/class/drm/renderD128/device/driver 2>/dev/null | grep -q '/xe$'; then
+    warn "VTune $VTV_MAJOR + BMG-class GPU (xe driver) is a known-broken combination; install VTune 2026.0 or use unitrace for BMG kernel attribution"
+  fi
 fi
 
 # ---- Section 3: unitrace skill ----

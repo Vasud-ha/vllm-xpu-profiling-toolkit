@@ -53,13 +53,15 @@ ldconfig
 pip install ittapi
 ```
 
-**Known BMG/Xe2 limitation.** VTune 2025.x GPU-Hotspots was validated on
-the `i915` kernel driver. On BMG (which uses `xe`), `gpu-hotspots` runs
-but the per-kernel "Hottest GPU Computing Tasks" table often comes back
-empty — VTune's metric-discovery interface doesn't yet enumerate xe metric
-groups. `run_vtune_vllm.sh` prints a `[WARN]` in preflight when it detects
-`xe`. For BMG kernel-level attribution, prefer **unitrace** until VTune
-2026+ ships xe support.
+**BMG requires VTune 2026.0.** VTune 2025.x fails on BMG with
+`Cannot collect GPU hardware metrics because neither libigdmd.so nor libmd.so
+was found` — even with `intel-metrics-discovery` installed and the
+unversioned `libigdmd.so` symlink in place. Confirmed working on VTune
+2026.0 against the same BMG hardware (prior runs). VTune 2026.0 is not in
+the Intel apt repo as of writing — install it via the standalone Intel
+installer from
+<https://www.intel.com/content/www/us/en/developer/tools/oneapi/vtune-profiler-download.html>
+or use **unitrace** for BMG kernel attribution.
 
 ---
 

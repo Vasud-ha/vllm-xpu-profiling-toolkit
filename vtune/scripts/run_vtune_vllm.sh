@@ -190,15 +190,28 @@ preflight() {
     fail=1
   fi
 
-  # 6c. Xe driver warning — VTune 2025.x GPU-Hotspots does not fully support
-  # the xe kernel driver (BMG/Xe2, Lunar Lake). Collection may run but produce
-  # empty "Hottest GPU Computing Tasks" tables. Not a hard failure.
-  if readlink /sys/class/drm/renderD128/device/driver 2>/dev/null | grep -q '/xe$'; then
-    echo "  [WARN] GPU uses the 'xe' kernel driver."
-    echo "         VTune 2025.x GPU-Hotspots was validated on i915; on xe the"
-    echo "         per-kernel GPU Time table can come back empty. Consider"
-    echo "         unitrace for BMG kernel attribution until VTune 2026+ ships"
-    echo "         xe-native support."
+  # 6c. VTune version check — on BMG hardware, VTune 2025.x fails to collect
+  # GPU metrics ("Cannot collect GPU hardware metrics because neither
+  # libigdmd.so nor libmd.so was found") even with intel-metrics-discovery
+  # installed. VTune 2026.0 has been observed to succeed on the same BMG HW.
+  # Warn if the resolved vtune binary is older than 2026 AND the GPU appears
+  # to be BMG-class (device id 0xe223 or the xe kernel driver).
+  if command -v vtune >/dev/null 2>&1; then
+    VTV_MAJOR=$(vtune --version 2>&1 | head -1 | grep -oE '[0-9]{4}' | head -1 || echo "0")
+    if [[ "$VTV_MAJOR" -lt 2026 ]] 2>/dev/null; then
+      GPU_IS_BMG_LIKE=0
+      if readlink /sys/class/drm/renderD128/device/driver 2>/dev/null | grep -q '/xe$'; then
+        GPU_IS_BMG_LIKE=1
+      fi
+      if [[ "$GPU_IS_BMG_LIKE" -eq 1 ]]; then
+        echo "  [WARN] VTune $VTV_MAJOR + BMG-class GPU (xe driver) is a known"
+        echo "         broken combination. Collection dies with 'Cannot collect"
+        echo "         GPU hardware metrics'. Prior runs on this hardware only"
+        echo "         succeeded with VTune 2026.0. Options:"
+        echo "           - install VTune 2026.0 from the standalone Intel installer"
+        echo "           - use unitrace instead for BMG kernel attribution"
+      fi
+    fi
   fi
 
   # 7. Nothing already on $PORT
