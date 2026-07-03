@@ -204,3 +204,91 @@ To actually complete the 3-profiler smoke test:
 - **VTune 2026.2 ITT shipping**: only `libittnotify.a` (static) + `libittnotify_collector.so` — no shared `libittnotify.so`. `serve_with_vtune.py`'s existing resolution path (prefer `ctypes.CDLL(None)` for collector-injected symbols) already handles this correctly.
 - **Preflight false positive** on port 8000: happened once because a killed `serve_with_vtune.py` from attempt 3 left the socket in `TIME_WAIT`. The wrapper's port-check is strict-correct; `fuser -k` cleanup should be the documented recovery.
 - **Container `/root/toolkit`** was already a git checkout of this repo — 14 commits ahead of GitHub when we started, pulled up to `5676471` after fast-forward, then adjusted with the env-var patches described above.
+
+---
+
+## Session 2 — Fresh container on GPU BDF `0000:ba:00.0`
+
+New pod spun up (`skill-test-vasu`, same image `intel/vllm:0.21.0-ubuntu24.04-20260625`), user manually installed **VTune 2026.0.0 (build 631999)**. Toolkit re-cloned at `d56f27f`. Preflight all-green.
+
+### Attempt 5 — VTune E2E after clean install
+
+```
+export HF_HOME=/root/local_hf_cache
+MODEL=meta-llama/Llama-3.1-8B-Instruct MAX_MODEL_LEN=2048 \
+VTUNE_PHASE=prefill INPUT_LEN=512 OUTPUT_LEN=1 \
+NUM_PROMPTS=3 WARMUP_PROMPTS=2 MAX_CONCURRENCY=1 \
+./run_vtune_vllm.sh
+```
+
+**Weight-load went to fast path**:
+
+```
+08:01:23  Initializing V1 LLM engine (v0.21.1.dev17+g0a4756bb5)
+08:01:27  Starting to load model
+08:03:37  Loading weights took 2.56 seconds   [via local cache]
+```
+
+Weight load: **2.56 s**. NFS bottleneck fully resolved by local staging.
+
+**Failure at KV-cache probe (this is the real blocker now):**
+
+```
+08:04:10  EngineCore failed to start.
+          File .../triton/runtime/build.py:117 in _build
+          subprocess.CalledProcessError:
+            Command '['/opt/intel/oneapi/compiler/2025.3/bin/icpx',
+                       '/tmp/tmp07quuk08/main.cpp', '-O3', '-shared',
+                       ..., '-fsycl']' returned non-zero exit status 1.
+
+          RuntimeError: llvm-foreach: Illegal instruction (core dumped)
+          icpx: error: llvm-spirv command failed with exit code 254
+          icpx: note: diagnostic msg: Error generating preprocessed source(s).
+
+vtune: Error: [Instrumentation Engine]: ParentExecAppWithInjectorControl:
+       Injector (6609) was terminated by a signal: 11
+vtune: Collection failed.
+```
+
+### Root cause identified
+
+**`llvm-foreach` (Intel SYCL compiler toolchain, called by `icpx` during SPIR-V generation) crashes with SIGILL under VTune's runtime environment.** Same signature previously seen on `intel/vllm:0.14.1-xpu` — see [[feedback-vllm-xpu-enforce-eager]].
+
+Called from `_initialize_kv_caches → determine_available_memory → collective_rpc`, i.e. the KV-cache-size probe that vLLM 0.21 runs early in engine init. It JIT-compiles `spirv_utils.cpython-312-x86_64-linux-gnu.so` via `triton/runtime/build.py::_build` regardless of `--enforce-eager`, because the eager flag only disables torch.compile / Inductor / CUDAGraphs — it does not disable Triton XPU backend's own SYCL utility builds.
+
+Sequence of failure:
+1. Triton XPU backend calls `icpx` in a subprocess to build `spirv_utils.so`.
+2. `icpx` internally invokes `llvm-spirv` → `llvm-foreach`.
+3. Under VTune's ITT injection (`LD_PRELOAD=libittnotify_collector.so`), `llvm-foreach` hits **SIGILL** on some `pext/pdep`-family instruction. Prior memory record narrows this to a code path exercised only when the tracer's instrumentation ABI-mismatches with an old llvm binary.
+4. Triton propagates the CalledProcessError up; EngineCore dies.
+5. VTune injector cleaning up the SIGILL child gets SIGSEGV itself.
+
+### Workaround options
+
+1. **Pre-build `spirv_utils.so` outside VTune** — start vLLM once WITHOUT VTune, let Triton write `spirv_utils.so` into its cache dir, then run under VTune with `TRITON_CACHE_DIR=<primed dir>`. **Blocked**: Triton for vLLM 0.21 puts the compiled artifact in `/tmp/tmpXXXXX/` (per-run temp dir), not in `~/.triton/cache`, so it isn't reused across runs.
+
+2. **Downgrade oneAPI compiler** — the vLLM 0.14.1-xpu image bundled oneAPI 2025.2 for which our older memory record noted `--enforce-eager` was sufficient. The 0.21 image ships **oneAPI 2025.3**; something in the 2025.3 `icpx`/`llvm-foreach` combo doesn't survive VTune injection. Would need a different vLLM image build.
+
+3. **Pre-warm inside VTune by starting collection AFTER init** — use VTune `-start-paused` which the wrapper already does, PLUS defer the initial `vtune -command resume` until after the API server's `/health` is 200-OK. The wrapper already does this correctly (`vtune -command resume` is called just before the bench.log run, after warmup completes) — but the crash occurs during EngineCore init, BEFORE the API server is ever ready. So this workaround doesn't help.
+
+4. **Use unitrace instead of VTune for this vLLM version** — unitrace uses `LD_PRELOAD=libunitrace_tool.so`, not VTune's collector — different injection ABI, may bypass the SIGILL. This is the most promising path.
+
+5. **Use PyTorch profiler instead** — pt_profile does NOT rely on binary injection; it uses `torch.profiler` API calls emitted by the vLLM built-in `/start_profile` endpoint. Should be unaffected by the icpx crash.
+
+### Status
+
+- **VTune E2E: BLOCKED** on this container image. Root cause is upstream `oneAPI 2025.3 icpx / llvm-foreach` vs `VTune 2026.0`, not our wrappers. Wrappers are correct.
+- **unitrace E2E: not yet tried in this session** — recommend running next.
+- **PyTorch profiler E2E: not yet tried in this session** — recommend running next.
+
+### Environment-var hygiene notes
+
+- **HF_HOME=/root/local_hf_cache is critical** — without it every attempt spends 4-10 min on NFS reads. Once local weights exist the load time is <10 s.
+- **VLLM_ENGINE_READY_TIMEOUT_S=1800** and wrapper `/health` poll bumped to 900 iterations × 2 s = 30 min. Both already pushed to `d56f27f`.
+- **VLLM_WORKER_MULTIPROC_METHOD=spawn** is the intel/vllm-recommended default and does NOT cause the icpx crash — a run with `fork` would only differ in whether the child inherits Python interpreter state, not in whether icpx runs.
+
+### Recommended next steps (for the user)
+
+1. Try the unitrace wrapper — different injection mechanism, likely bypasses the SIGILL.
+2. Try the pytorch-profiler wrapper — no injection at all.
+3. If VTune is required, ask the intel/vllm team for a build that pairs vLLM 0.21 with oneAPI 2025.2 (or waits for oneAPI 2025.4 with a llvm-foreach fix).
