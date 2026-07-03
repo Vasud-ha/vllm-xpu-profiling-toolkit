@@ -315,8 +315,11 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # ---- Step 2: Wait for /health ----
+# 900 iterations * 2s = 30 min. vLLM 0.21 cold model-load on this image
+# routinely exceeds 10 min; NFS-mounted /hf_cache pushes it higher. Match
+# the VLLM_ENGINE_READY_TIMEOUT_S bump we exported above.
 echo "Waiting for vLLM server on http://$HOST:$PORT ..."
-for _ in $(seq 1 240); do
+for _ in $(seq 1 900); do
   if curl -sf "http://$HOST:$PORT/health" > /dev/null; then
     echo "Server ready."
     break
