@@ -76,13 +76,20 @@ export PT_PHASE
 export PT_LABEL_EVERY_STEP
 
 # ---- Environment ----
-if [[ -z "${SETVARS_COMPLETED:-}" ]]; then
-  if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
-    # shellcheck disable=SC1091
-    source /opt/intel/oneapi/setvars.sh
-  fi
+# Always re-source setvars.sh with --force. On intel/vllm:0.21.0-ubuntu24.04-*
+# oneAPI env vars are set by ENTRYPOINT, which `docker exec` bypasses — a
+# non-interactive exec'd shell sees only Config.Env (PATH + VLLM_VERSION), so
+# libccl.so.1 / LD_LIBRARY_PATH / etc. are missing and `import torch` fails.
+# 0.17.0-xpu had these baked into image Config.Env so they were always present.
+# setvars.sh references unset vars under `set -u`, so drop pipefail/nounset
+# around the source and re-enable after.
+if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
+  set +euo pipefail
+  # shellcheck disable=SC1091
+  source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
+  set -euo pipefail
 else
-  echo "oneAPI already sourced (SETVARS_COMPLETED=$SETVARS_COMPLETED) - skipping."
+  echo "WARN: /opt/intel/oneapi/setvars.sh not found - vLLM may not start"
 fi
 
 # torch.profiler doesn't need ZE/PTI tracing layers; in fact, having them

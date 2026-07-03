@@ -292,3 +292,48 @@ Sequence of failure:
 1. Try the unitrace wrapper — different injection mechanism, likely bypasses the SIGILL.
 2. Try the pytorch-profiler wrapper — no injection at all.
 3. If VTune is required, ask the intel/vllm team for a build that pairs vLLM 0.21 with oneAPI 2025.2 (or waits for oneAPI 2025.4 with a llvm-foreach fix).
+
+---
+
+## Image-level design shift: 0.17.0-xpu → 0.21.0-ubuntu24.04
+
+Root cause of the naked `source setvars.sh` failures in Session 2, contributed by user:
+
+**`intel/vllm:0.17.0-xpu`**
+- No `ENTRYPOINT`; `Cmd = ['/bin/bash']`.
+- All oneAPI env vars (`LD_LIBRARY_PATH`, `CCL_ROOT`, `PATH`, `MKLROOT`, `SETVARS_COMPLETED=1`, …) baked into image `Config.Env` at build time (Dockerfile `ENV` directives).
+- Docker injects these into every process regardless of shell mode. Non-interactive `docker exec -d ... bash -c '…'` → works — `python -c "import torch"` prints `2.10.0+xpu`.
+- Duplicate `source /opt/intel/oneapi/setvars.sh --force` in `/root/.bashrc:100–101` is belt-and-braces convenience for interactive users.
+
+**`intel/vllm:0.21.0-ubuntu24.04-20260625`**
+- `ENTRYPOINT = /bin/bash -c 'source /opt/intel/oneapi/setvars.sh --force && exec "$@"'`.
+- Image `Config.Env` contains only `PATH` and `VLLM_VERSION`. No oneAPI vars.
+- Env is populated at container start **by ENTRYPOINT, not baked into `Config.Env`**.
+- **`docker exec` bypasses `ENTRYPOINT` entirely** — the exec'd process is a direct child of `dockerd`, not descended from the ENTRYPOINT process. So exec'd shells see only `Config.Env`, which lacks oneAPI.
+- Interactive `docker exec -it bash` still works only because `.bashrc` redundantly sources setvars (guarded by `[ -z "$PS1" ] && return`).
+- Non-interactive `docker exec -d bash -c '…'` skips `.bashrc` and gets no oneAPI env → `libccl.so.1 not found`.
+
+**One-line summary**: 0.17 promotes oneAPI to image-level `ENV` (works everywhere); 0.21 demotes it to `ENTRYPOINT + interactive .bashrc` (works only in the paths the docs assume).
+
+### Consequences for the toolkit
+
+Every wrapper must source `setvars.sh` itself; it can't rely on the shell's ambient environment. The VTune wrapper (`run_vtune_vllm.sh`) already did this at commit `4cc95a7` — but with a subtlety: `setvars.sh` uses `unset`/`return` on nonempty variables under `set -euo pipefail`, which the script would then propagate as failure. **The fix is to drop pipefail/nounset around the source and re-enable after.**
+
+Session 2 discovered the unitrace and pytorch-profiler wrappers had **not** been ported to this pattern. Session-2 patches:
+
+```bash
+# both wrappers now do:
+if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
+  set +euo pipefail
+  source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
+  set -euo pipefail
+fi
+```
+
+Failure signature in `/tmp/uni_log.txt` before the patch:
+
+```
+/opt/intel/oneapi/compiler/latest/env/vars.sh: line 258: OCL_ICD_FILENAMES: unbound variable
+```
+
+(setvars.sh unsets `OCL_ICD_FILENAMES` under `set -u`; wrapper dies immediately.)

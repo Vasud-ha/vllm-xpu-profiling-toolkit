@@ -109,9 +109,13 @@ export UNITRACE_ROI_GATE="$RESULT_DIR/roi_gate"
 
 # ---------------- oneAPI ----------------
 # unitrace links against libxptifw / libittnotify from oneAPI.
-if [[ -z "${SETVARS_COMPLETED:-}" && -f /opt/intel/oneapi/setvars.sh ]]; then
+# setvars.sh references unset vars (e.g. OCL_ICD_FILENAMES) under `set -u`,
+# so temporarily drop pipefail/nounset around the source and re-enable after.
+if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
+  set +euo pipefail
   # shellcheck disable=SC1091
-  source /opt/intel/oneapi/setvars.sh --force >/dev/null
+  source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
+  set -euo pipefail
 fi
 
 echo "==== unitrace ROI vLLM serve ===="
