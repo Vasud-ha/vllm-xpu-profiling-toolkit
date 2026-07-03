@@ -100,6 +100,9 @@ export TORCH_LLM_ALLREDUCE=1
 export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
 export VLLM_USE_V1=1
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
+# Cold weight-load on NFS-mounted /hf_cache can exceed vLLM 0.21's 600s
+# default engine-ready timeout (observed: ~10 min for Llama-3.1-8B).
+export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-1800}"
 
 # Sentinel-file path shared by API server and EngineCore subprocess.
 export UNITRACE_ROI_GATE="$RESULT_DIR/roi_gate"

@@ -92,6 +92,16 @@ for VAR in ZE_ENABLE_TRACING_LAYER ZE_LOADER_LAYERS_ENABLE \
   unset "$VAR"
 done
 
+# vLLM env - align with intel/vllm:0.21.0-ubuntu24.04-* defaults.
+# See run_vtune_vllm.sh for rationale on each. VLLM_ENGINE_READY_TIMEOUT_S
+# is raised because cold weight-load on NFS-mounted /hf_cache can exceed
+# vLLM's 600s default (observed: ~10 min for Llama-3.1-8B on 0.21).
+export HF_HOME="${HF_HOME:-/hf_cache}"
+export TORCH_LLM_ALLREDUCE="${TORCH_LLM_ALLREDUCE:-1}"
+export VLLM_ALLOW_LONG_MAX_MODEL_LEN="${VLLM_ALLOW_LONG_MAX_MODEL_LEN:-1}"
+export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
+export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-1800}"
+
 # ---- Pre-flight checks ----
 preflight() {
   local fail=0

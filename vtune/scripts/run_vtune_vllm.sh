@@ -97,6 +97,20 @@ if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
 else
   echo "WARN: /opt/intel/oneapi/setvars.sh not found - vtune may not be on PATH"
 fi
+
+# vLLM env - align with intel/vllm:0.21.0-ubuntu24.04-* defaults.
+# HF_HOME: HuggingFace cache. Override if your cache lives elsewhere.
+# TORCH_LLM_ALLREDUCE / VLLM_ALLOW_LONG_MAX_MODEL_LEN: recommended by the
+#   intel/vllm image maintainers for XPU multi-GPU runs.
+# VLLM_WORKER_MULTIPROC_METHOD=spawn: safer under VTune's collector
+#   (`fork` inherits the collector's LD_PRELOAD and can confuse ITT).
+# VLLM_ENGINE_READY_TIMEOUT_S=1800: vLLM 0.21 cold model load on NFS-mounted
+#   HF caches can take 5-10 min; the 600s default trips before weights load.
+export HF_HOME="${HF_HOME:-/hf_cache}"
+export TORCH_LLM_ALLREDUCE="${TORCH_LLM_ALLREDUCE:-1}"
+export VLLM_ALLOW_LONG_MAX_MODEL_LEN="${VLLM_ALLOW_LONG_MAX_MODEL_LEN:-1}"
+export VLLM_WORKER_MULTIPROC_METHOD="${VLLM_WORKER_MULTIPROC_METHOD:-spawn}"
+export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-1800}"
 # VTune manages Level Zero tracing itself; manual settings cause empty GPU timelines.
 for VAR in ZE_ENABLE_TRACING_LAYER ZE_LOADER_LAYERS_ENABLE \
            PTI_ENABLE_COLLECTION PTI_ENABLE_RUNTIME_TRACING; do
