@@ -410,6 +410,82 @@ Load time: model weights loaded in <10 s from local cache. Wrapper's own bench +
 - `6b0b3b7` — session-2 verification log with VTune llvm-foreach root cause
 - `2b2e4b7` — unitrace + pytorch-profiler: isolate setvars.sh from set -euo pipefail (0.17→0.21 image env shift)
 
+---
+
+## Session 3 — Advanced unitrace features on BMG
+
+Extending the working unitrace path (from Session 2) with the three pti-gpu-shipped features: metric query, GPU roofline, kernel categorization.
+
+### Test 1 — Metric query (`--metric-query`, `-q`) — ✅ PASS
+
+```bash
+$UBIN -q -g ComputeBasic --chrome-kernel-logging -o $RDIR/compute python serve_with_unitrace.py ...
+```
+
+**Result**: `compute.metrics.22260` — 2.4 MB CSV, 4540 rows, 1115 unique kernels, ~80 metric columns.
+
+Column set includes:
+- Timing: `GpuTime[ns]`, `GpuCoreClocks`, `XVE_ACTIVE[%]`, `XVE_STALL[%]`, `XVE_THREADS_OCCUPANCY_ALL[%]`
+- Memory hierarchy: `LOAD_STORE_CACHE_BYTE_READ/WRITE`, `L3_READ/WRITE`, `L3_HIT/MISS`, `GPU_MEMORY_BYTE_READ/WRITE`
+- Compute occupancy: `XVE_INST_EXECUTED_ALU0/1/2_ALL`, `XVE_PIPE_ALU0_AND_ALU1_ACTIVE`, `XVE_MULTIPLE_PIPE_ACTIVE`
+- Bandwidth: `GPU_MEMORY_BYTE_READ_RATE[GBpS]`, `GPU_MEMORY_BYTE_WRITE_RATE[GBpS]`
+
+Kernels captured: `vllm::silu_kernel`, `at::native::xpu::BinaryFunctor<...>`, `xpu::xetla::hgemm_caller`, RMSNorm, RotaryEmbedding, plus all Level-Zero utility kernels (`fill`, `direct_copy`, `memcpy`).
+
+### Test 2 — GPU roofline (`roofline.py`) — ⚠️ PARTIAL, adaptations needed for BMG
+
+`scripts/roofline/roofline.py` hard-codes two group names:
+- `ComputeBasic` — works as-is on BMG
+- `VectorEngine138` — **does not exist on BMG**; the equivalent is `VectorEngineProfile`
+
+`scripts/roofline/roofline_libs.py` reads columns:
+- `L3_BYTE_READ/WRITE` — **does not exist on BMG**; equivalent is `LOAD_STORE_CACHE_BYTE_READ/WRITE`
+- `XVE_INST_EXECUTED_XMX_FP16_UTILIZATION` — **not surfaced on this BMG L0 driver**
+
+`scripts/roofline/device_configs/` ships only `PVC_1tile.csv`. A BMG config would look like:
+
+```csv
+PlatformName,"BMG"
+FP16_GFLOPS,<peak_fp16>
+FP16_XMX_GFLOPS,<peak_fp16_xmx>
+BF16_XMX_GFLOPS,<peak_bf16_xmx>
+FP32_GFLOPS,<peak_fp32>
+FP64_GFLOPS,<peak_fp64>
+GPU_MEMORY_BW_in_GB_per_sec,<peak_hbm_bw>
+L3_BW_in_GB_per_sec,<peak_l3_bw>
+```
+
+To make it work end-to-end on BMG:
+1. Patch `roofline.py`: `VectorEngine138` → `VectorEngineProfile` (or run the two-step invocation with correct groups)
+2. Patch `roofline_libs.py`: `L3_BYTE_READ/WRITE` → `LOAD_STORE_CACHE_BYTE_READ/WRITE` (and either drop or synthesize `XVE_INST_EXECUTED_XMX_FP16_UTILIZATION`)
+3. Author `device_configs/BMG.csv` with vendor-published peak FLOPS/BW for Xe2 Battlemage
+4. Run: `unitrace -q -g ComputeBasic ...` and `unitrace -q -g VectorEngineProfile ...`, then `python roofline.py --compute cb.csv --memory vep.csv --device device_configs/BMG.csv --output roofline.html`
+
+Deferred — mechanically straightforward but out of session budget.
+
+### Test 3 — Kernel categorization (`categorize.py` + `summary.py`) — ⚠️ PARTIAL
+
+Pipeline validated: `scripts/summary/categorize.py` compiles `LLaMA.ini` → `LLaMA.json`, and `summary.py` takes a tar of unitrace `-h -d` outputs + the schema and produces a JSON with per-category time & call counts (matmul, allreduce, attn, norm, mem_op, beam, sync, vector, slice, wallclock, total).
+
+Capture attempt: `unitrace -h -d --chrome-kernel-logging -o run <serve>` → API server flushed a valid `API Timing Summary` (503 ms of L0 API time, 96 `zeCommandListCreateImmediate` calls, etc.), but the EngineCore worker process didn't flush its Device Timing Summary within the shutdown grace period because the combined `-h -d` overhead made the 3-prompt bench run past our wait window.
+
+Recipe to reproduce successfully:
+```bash
+unitrace -h -d --chrome-kernel-logging -o run python serve_with_unitrace.py &
+# wait /health, then a LONGER bench (30-60 prompts) so unitrace has enough kernels to sample
+curl /start_profile; vllm bench serve --num-prompts 30 ...; curl /stop_profile
+# SIGINT vLLM and wait ≥ 30s for both API+Engine to flush their run.* summaries
+tar czf run.tgz run.*  # only include non-empty run.<pid> files
+python3 scripts/summary/summary.py --input run.tgz --schema scripts/summary/schemas/LLaMA.json --output summary.json
+```
+
+`summary.json` will contain fields like:
+```json
+{ "matmul_time": ..., "matmul_calls": ..., "attn_time": ..., "norm_time": ..., "mem_op_time": ... }
+```
+
+Deferred — needs a longer capture window or `-d` only (drop `-h`) to reduce overhead.
+
 ## Reproducibility recipe
 
 ```bash
