@@ -127,6 +127,78 @@ echo "Preset:          $UNITRACE_PRESET"
 echo "unitrace flags:  $UNITRACE_FLAGS"
 echo "================================="
 
+# ---------------- Env snapshot ----------------
+# Write env_snapshot.json into RESULT_DIR so generate_report.py can render
+# the actual runtime environment (container image, vLLM/torch versions,
+# oneAPI, kernel, GPU) instead of hard-coded strings. Best-effort — any
+# probe that fails becomes null in the JSON.
+_probe() { local out; out=$("$@" 2>/dev/null); printf '%s' "$out"; }
+_json_str() {
+  # JSON-escape a string (quotes, backslashes, newlines, tabs). Prints "null" for empty.
+  python3 - "$1" <<'PY' 2>/dev/null || printf 'null'
+import json, sys
+s = sys.argv[1]
+print("null" if s == "" else json.dumps(s))
+PY
+}
+
+_snap="$RESULT_DIR/env_snapshot.json"
+_container_image="${UNITRACE_CONTAINER_IMAGE:-}"
+if [[ -z "$_container_image" && -r /etc/os-release ]]; then
+  # No reliable in-container way to read our own image tag. Prefer explicit
+  # env override; else leave blank so the report shows "unknown".
+  :
+fi
+_vllm_ver="$(_probe python3 -c 'import vllm;print(vllm.__version__)')"
+_torch_ver="$(_probe python3 -c 'import torch;print(torch.__version__)')"
+_torch_xpu="$(_probe python3 -c 'import torch;print(getattr(torch,"xpu",None) is not None and torch.xpu.is_available())')"
+_oneapi_ver="${ONEAPI_ROOT:-}"
+if [[ -z "$_oneapi_ver" && -d /opt/intel/oneapi ]]; then
+  _oneapi_ver="$(readlink -f /opt/intel/oneapi 2>/dev/null || echo /opt/intel/oneapi)"
+fi
+_icpx_ver="$(_probe icpx --version | head -1)"
+_kernel="$(_probe uname -r)"
+_kmd="$(_probe uname -sm)"
+_hostname="$(_probe hostname)"
+_gpu_info="$(_probe xpu-smi discovery)"
+if [[ -z "$_gpu_info" ]]; then
+  _gpu_info="$(_probe sycl-ls)"
+fi
+_unitrace_ver="$(_probe "$UNITRACE_BIN" --version)"
+_python_ver="$(_probe python3 --version)"
+
+cat > "$_snap" <<EOF
+{
+  "container_image": $(_json_str "$_container_image"),
+  "hostname": $(_json_str "$_hostname"),
+  "kernel": $(_json_str "$_kernel"),
+  "arch": $(_json_str "$_kmd"),
+  "python": $(_json_str "$_python_ver"),
+  "vllm": $(_json_str "$_vllm_ver"),
+  "torch": $(_json_str "$_torch_ver"),
+  "torch_xpu_available": $(_json_str "$_torch_xpu"),
+  "oneapi_root": $(_json_str "$_oneapi_ver"),
+  "icpx_version": $(_json_str "$_icpx_ver"),
+  "unitrace_bin": $(_json_str "$UNITRACE_BIN"),
+  "unitrace_version": $(_json_str "$_unitrace_ver"),
+  "unitrace_preset": $(_json_str "$UNITRACE_PRESET"),
+  "unitrace_flags": $(_json_str "$UNITRACE_FLAGS"),
+  "model": $(_json_str "$MODEL"),
+  "port": $(_json_str "$PORT"),
+  "dtype": $(_json_str "$DTYPE"),
+  "tp_size": $(_json_str "$TP_SIZE"),
+  "gpu_info": $(_json_str "$_gpu_info"),
+  "vllm_env": {
+    "VLLM_USE_V1": $(_json_str "${VLLM_USE_V1:-}"),
+    "VLLM_WORKER_MULTIPROC_METHOD": $(_json_str "${VLLM_WORKER_MULTIPROC_METHOD:-}"),
+    "VLLM_ALLOW_LONG_MAX_MODEL_LEN": $(_json_str "${VLLM_ALLOW_LONG_MAX_MODEL_LEN:-}"),
+    "SYCL_UR_USE_LEVEL_ZERO_V2": $(_json_str "${SYCL_UR_USE_LEVEL_ZERO_V2:-}"),
+    "TORCH_LLM_ALLREDUCE": $(_json_str "${TORCH_LLM_ALLREDUCE:-}")
+  }
+}
+EOF
+echo "[run_unitrace_vllm] env snapshot: $_snap"
+
 # When the launcher exits (Ctrl-C or unitrace returns), build the HTML report.
 # Skipped if explicitly disabled via UNITRACE_SKIP_REPORT=1.
 report_on_exit() {
