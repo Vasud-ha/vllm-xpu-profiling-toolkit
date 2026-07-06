@@ -37,6 +37,19 @@ GAP_US = 500          # iteration boundary
 DENSE_MIN_KERNELS = 20  # what counts as a "dense" iteration (filters scheduler ticks)
 
 
+def _load_env_snapshot(result_dir: str) -> dict:
+    """Load env_snapshot.json if the launcher wrote one. Missing / malformed
+    returns an empty dict — callers show 'unknown' for absent fields."""
+    p = os.path.join(result_dir, "env_snapshot.json")
+    if not os.path.exists(p):
+        return {}
+    try:
+        with open(p) as f:
+            return json.load(f) or {}
+    except (OSError, ValueError):
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # Trace parsing
 # ---------------------------------------------------------------------------
@@ -536,10 +549,10 @@ def _findings(total_gpu_ms, wall_span_ms, top_rows, iters_dense, has_itt) -> lis
     out.append((
         "note",
         "F6 — <code>--enforce-eager</code> is required on intel/vllm-xpu",
-        "torch.compile inside <code>intel/vllm:0.14.1-xpu</code> hits an llvm-foreach "
-        "SEGV in SYCL JIT. <code>--enforce-eager</code> is mandatory and (as a side-effect) "
-        "gives clearer kernel names. Trade-off: you lose graph-replay benefits, which is "
-        "part of why host gaps are larger than they'd otherwise be.",
+        "torch.compile inside intel/vllm-xpu containers has been observed to hit an "
+        "llvm-foreach SEGV in SYCL JIT. <code>--enforce-eager</code> is mandatory and "
+        "(as a side-effect) gives clearer kernel names. Trade-off: you lose graph-replay "
+        "benefits, which is part of why host gaps are larger than they'd otherwise be.",
     ))
     return out
 
@@ -710,17 +723,59 @@ def build_html(
     timeline_svg = _timeline_svg(iters_dense)
     stacked_svg = _stacked_bar_svg(overall_top, total_gpu_ms)
 
-    # Static prose blocks ----------------------------------------------------
-    setup_table = """
-<table>
-<tr><th>Component</th><th>Version / Path</th></tr>
-<tr><td>Container image</td><td><code>intel/vllm:0.14.1-xpu</code></td></tr>
-<tr><td>vLLM</td><td>v1 API path (<code>VLLM_USE_V1=1</code>)</td></tr>
-<tr><td>oneAPI</td><td>2025.3 (sourced via <code>/opt/intel/oneapi/setvars.sh --force</code>)</td></tr>
-<tr><td>unitrace</td><td>pti-gpu 2.3.0; binary at <code>$UNITRACE_BIN</code></td></tr>
-<tr><td>Result root</td><td><code>$RESULT_ROOT</code> (this run: <code>{rd}</code>)</td></tr>
-</table>
-""".replace("{rd}", _esc(result_dir))
+    # Setup table — built from env_snapshot.json written by run_unitrace_vllm.sh
+    env_snap = _load_env_snapshot(result_dir)
+
+    def _cell(v):
+        if v in (None, "", "null"):
+            return "<em>unknown</em>"
+        return f"<code>{_esc(str(v))}</code>"
+
+    _vllm_env = env_snap.get("vllm_env", {}) or {}
+    _vllm_env_html = ", ".join(
+        f"<code>{_esc(k)}={_esc(str(v))}</code>"
+        for k, v in _vllm_env.items() if v not in (None, "", "null")
+    ) or "<em>none captured</em>"
+
+    setup_rows = [
+        ("Container image", _cell(env_snap.get("container_image"))),
+        ("Hostname", _cell(env_snap.get("hostname"))),
+        ("Kernel / arch", f"{_cell(env_snap.get('kernel'))} / {_cell(env_snap.get('arch'))}"),
+        ("Python", _cell(env_snap.get("python"))),
+        ("vLLM", _cell(env_snap.get("vllm"))),
+        ("PyTorch", _cell(env_snap.get("torch"))
+            + (f" (XPU available: <code>{_esc(str(env_snap.get('torch_xpu_available')))}</code>)"
+               if env_snap.get("torch_xpu_available") not in (None, "") else "")),
+        ("oneAPI root", _cell(env_snap.get("oneapi_root"))),
+        ("icpx", _cell(env_snap.get("icpx_version"))),
+        ("unitrace binary", _cell(env_snap.get("unitrace_bin"))),
+        ("unitrace version", _cell(env_snap.get("unitrace_version"))),
+        ("unitrace flags", _cell(env_snap.get("unitrace_flags"))),
+        ("Preset", _cell(env_snap.get("unitrace_preset"))),
+        ("Model", _cell(env_snap.get("model"))),
+        ("Port / TP / dtype",
+            f"{_cell(env_snap.get('port'))} / {_cell(env_snap.get('tp_size'))} / {_cell(env_snap.get('dtype'))}"),
+        ("vLLM env", _vllm_env_html),
+        ("Result dir", f"<code>{_esc(result_dir)}</code>"),
+    ]
+    setup_table = (
+        "<table>\n<tr><th>Component</th><th>Value</th></tr>\n"
+        + "\n".join(f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in setup_rows)
+        + "\n</table>"
+    )
+
+    _gpu_info_raw = (env_snap.get("gpu_info") or "").strip()
+    if _gpu_info_raw:
+        setup_table += (
+            "\n<details><summary>GPU / device inventory</summary>"
+            f"<pre>{_esc(_gpu_info_raw)}</pre></details>"
+        )
+    if not env_snap:
+        setup_table += (
+            '\n<div class="note warn"><b>Note:</b> no <code>env_snapshot.json</code> found in this '
+            'result dir. Fields shown as <em>unknown</em> mean the capture predates the env-snapshot '
+            'patch in <code>run_unitrace_vllm.sh</code>. Re-run to get a fully populated table.</div>'
+        )
 
     flags_table = """
 <table>
@@ -729,14 +784,17 @@ def build_html(
 <tr><td><code>-d</code></td><td>Print device-timing summary to stdout at process exit.</td></tr>
 <tr><td><code>--chrome-kernel-logging</code></td><td>Emit GPU kernels into the Chrome trace.</td></tr>
 <tr><td><code>--chrome-sycl-logging</code></td><td>Emit SYCL/UR runtime calls.</td></tr>
+<tr><td><code>--chrome-call-logging</code></td><td>Emit Level Zero / OpenCL host-API calls (e.g. <code>zeCommandListAppendLaunchKernel</code>).</td></tr>
 <tr><td><code>--chrome-itt-logging</code></td><td>Surface <code>__itt_resume</code>/<code>__itt_pause</code> markers in the trace.</td></tr>
+<tr><td><code>--metric-query [-q]</code></td><td>Per-kernel Level-Zero metric-query counters (default group: ComputeBasic). CSV lands in <code>unitrace.log</code>.</td></tr>
+<tr><td><code>--stall-sampling</code></td><td>EU stall sampling; per-IP stall-reason histogram in <code>unitrace.log</code>.</td></tr>
 </table>
 """
 
     troubleshooting_table = """
 <table>
 <tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
-<tr><td><code>(uintptr_t)(val)</code> cast error during build</td><td>L0 headers in oneAPI 2025.3 made <code>ze_ipc_event_counter_based_handle_t</code> a struct.</td><td>Patch <code>scripts/gen_tracing_callbacks.py::gen_to_hex_string_functions</code> with the templated <code>to_hex_value_</code> helper; <code>rm -f *.gen && make -j</code>.</td></tr>
+<tr><td><code>(uintptr_t)(val)</code> cast error during build</td><td>Newer L0 headers (oneAPI 2025.3+) made <code>ze_ipc_event_counter_based_handle_t</code> a struct.</td><td>Patch <code>scripts/gen_tracing_callbacks.py::gen_to_hex_string_functions</code> with the templated <code>to_hex_value_</code> helper; <code>rm -f *.gen && make -j</code>.</td></tr>
 <tr><td><code>ITT available: False</code></td><td>Wrapper opened <code>libittnotify.so</code> first; pti-gpu builds it as <code>.a</code> only.</td><td>Wrapper falls back to <code>libunitrace_tool.so</code>. Verify <code>UNITRACE_TOOL_LIB</code> env or default path.</td></tr>
 <tr><td><code>/start_profile</code> returns 404</td><td><code>runpy.run_module</code> would re-import api_server fresh and drop the monkey-patch.</td><td>Wrapper uses the <code>run_server(args)</code> direct call. Don't switch to runpy.</td></tr>
 <tr><td><code>[ERROR] Failed to launch target: --</code></td><td><code>unitrace -- python ...</code> rejects the separator.</td><td>Drop the <code>--</code>: <code>unitrace &lt;flags&gt; python ...</code>.</td></tr>
