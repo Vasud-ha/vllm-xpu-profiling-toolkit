@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>vLLM PyTorch Profiler + Perfetto — Technical Report</title>
+<style>
+  :root {
+    --bg:#0e1116; --panel:#161b22; --panel-2:#1c2128; --border:#30363d;
+    --text:#e6edf3; --muted:#8b949e; --accent:#58a6ff; --accent-2:#79c0ff;
+    --success:#3fb950; --warn:#d29922; --err:#f85149;
+    --code-bg:#0d1117; --code-fg:#c9d1d9; --kbd-bg:#21262d; --table-row:#1a1f26;
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; padding:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;
+    font-size:15px; line-height:1.6; }
+  .layout { display:grid; grid-template-columns:260px 1fr; min-height:100vh; }
+  nav.toc { background:var(--panel); border-right:1px solid var(--border);
+    padding:24px 16px; position:sticky; top:0; height:100vh; overflow-y:auto; }
+  nav.toc h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em;
+    color:var(--muted); margin:0 0 12px 0; }
+  nav.toc ol { list-style:none; padding:0; margin:0; counter-reset:toc; }
+  nav.toc li { counter-increment:toc; margin:4px 0; }
+  nav.toc li::before { content:counter(toc) "."; color:var(--muted);
+    margin-right:6px; font-variant-numeric:tabular-nums; }
+  nav.toc a { color:var(--text); text-decoration:none; font-size:14px; }
+  nav.toc a:hover { color:var(--accent-2); }
+  main { padding:36px 48px; max-width:1100px; }
+  header.hero { border-bottom:1px solid var(--border); padding-bottom:20px; margin-bottom:28px; }
+  header.hero h1 { font-size:28px; margin:0 0 6px 0; color:var(--accent-2); }
+  header.hero .subtitle { color:var(--muted); font-size:15px; }
+  .badges { margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; }
+  .badge { display:inline-block; padding:3px 10px; border-radius:999px;
+    background:var(--panel-2); border:1px solid var(--border); font-size:12px;
+    color:var(--muted); }
+  .badge.accent  { color:var(--accent);  border-color:rgba(88,166,255,.4); }
+  .badge.success { color:var(--success); border-color:rgba(63,185,80,.4); }
+  .badge.warn    { color:var(--warn);    border-color:rgba(210,153,34,.4); }
+  h2 { font-size:22px; margin:40px 0 10px 0; padding-bottom:6px;
+    border-bottom:1px solid var(--border); color:var(--accent-2); }
+  h3 { font-size:17px; margin:22px 0 6px 0; }
+  h4 { font-size:14px; text-transform:uppercase; letter-spacing:.05em;
+    margin:16px 0 4px 0; color:var(--muted); }
+  p { margin:6px 0 10px 0; }
+  ul,ol { margin:6px 0 10px 0; padding-left:22px; }
+  li { margin:3px 0; }
+  a { color:var(--accent); }
+  code { font-family:"SF Mono","Menlo","Consolas",monospace; font-size:13px;
+    background:var(--kbd-bg); padding:2px 6px; border-radius:4px; color:var(--accent-2); }
+  pre { font-family:"SF Mono","Menlo","Consolas",monospace; font-size:13px;
+    background:var(--code-bg); color:var(--code-fg); border:1px solid var(--border);
+    border-radius:6px; padding:12px 14px; overflow-x:auto; margin:10px 0; }
+  pre code { background:none; padding:0; color:inherit; }
+  table { border-collapse:collapse; width:100%; margin:10px 0 14px 0; font-size:14px; }
+  th,td { border:1px solid var(--border); padding:7px 11px; text-align:left; vertical-align:top; }
+  th { background:var(--panel-2); color:var(--accent-2); font-weight:600; }
+  tr:nth-child(even) td { background:var(--table-row); }
+  .callout { border-left:4px solid var(--accent); background:var(--panel);
+    padding:10px 14px; margin:12px 0; border-radius:0 6px 6px 0; }
+  .callout.warn { border-left-color:var(--warn); }
+  .callout.err  { border-left-color:var(--err); }
+  .callout.ok   { border-left-color:var(--success); }
+  .callout .title { font-weight:600; color:var(--accent-2); margin-bottom:3px; }
+  .callout.warn .title { color:var(--warn); }
+  .callout.err  .title { color:var(--err); }
+  .callout.ok   .title { color:var(--success); }
+  footer { margin-top:48px; padding-top:14px; border-top:1px solid var(--border);
+    color:var(--muted); font-size:13px; }
+  @media (max-width:900px) { .layout { grid-template-columns:1fr; }
+    nav.toc { position:static; height:auto; } main { padding:20px; } }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#summary">Summary</a></li>
+    <li><a href="#approach">Technical Approach</a></li>
+    <li><a href="#commands">Commands &amp; APIs</a></li>
+    <li><a href="#scripts">Scripts &amp; Recipes</a></li>
+    <li><a href="#perfetto">Perfetto Analysis</a></li>
+    <li><a href="#hotspots">Top Hotspots &amp; Patterns</a></li>
+    <li><a href="#optimization">Optimization Map</a></li>
+    <li><a href="#troubleshoot">Troubleshooting</a></li>
+    <li><a href="#conclusion">Conclusion</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<header class="hero">
+  <h1>vLLM PyTorch Profiler + Perfetto Analysis</h1>
+  <div class="subtitle">Vendor-agnostic vLLM profiling using the official <code>--profiler-config</code> CLI arg (vLLM &ge; 0.17) or the legacy <code>VLLM_TORCH_PROFILER_DIR</code> env var (&le; 0.14), the built-in <code>start_profile</code>&nbsp;/&nbsp;<code>stop_profile</code> endpoints, and Perfetto&nbsp;/&nbsp;chrome-tracing for analysis. Works on NVIDIA CUDA and Intel XPU builds.</div>
+  <div class="badges">
+    <span class="badge accent">torch.profiler</span>
+    <span class="badge accent">vLLM v1 (0.14 / 0.17 / 0.21)</span>
+    <span class="badge accent">Perfetto / chrome-tracing</span>
+    <span class="badge success">Vendor-agnostic</span>
+    <span class="badge warn">ROI = warmup-then-tight-window</span>
+  </div>
+  <p style="margin-top:14px;color:var(--muted);font-size:14px;">
+    <strong>Authoritative source:</strong>
+    <a href="https://docs.vllm.ai/en/stable/contributing/profiling/profiling_index.html">docs.vllm.ai — profiling index</a>
+  </p>
+</header>
+
+<!-- ===================== SUMMARY ===================== -->
+<section id="summary">
+<h2>1. Summary</h2>
+<p>vLLM exposes <code>torch.profiler</code> behind three layers — a version-dependent server gate,
+programmatic <code>start_profile</code>&nbsp;/&nbsp;<code>stop_profile</code>, and bench-driven
+<code>vllm bench serve --profile</code>. Traces are <code>.pt.trace.json</code> files
+(<code>.json.gz</code> when <code>torch_profiler_use_gzip</code> is set) opened in Perfetto
+(<a href="https://ui.perfetto.dev">ui.perfetto.dev</a>).</p>
+
+<div class="callout warn">
+  <div class="title">vLLM 0.17 changed the gate</div>
+  On vLLM &ge; 0.17 the <code>VLLM_TORCH_PROFILER_DIR</code> env var is silently ignored — the server
+  logs <em>"Unknown vLLM environment variable detected: VLLM_TORCH_PROFILER_DIR"</em> and
+  <code>curl -X POST /start_profile</code> returns 404 because the profile router only attaches when
+  <code>profiler_config.profiler is not None</code>. Pass a <code>ProfilerConfig</code> JSON via
+  <code>--profiler-config</code> instead. <code>run_pt_profile_vllm.sh</code> sets both — env var and
+  CLI arg — so it works on any supported release.
+</div>
+
+<div class="callout ok">
+  <div class="title">Goal</div>
+  Capture a tight, warm-state window — 1–2 prefill steps + 5–20 decode steps — so the trace stays in the
+  hundreds of MB and Perfetto can render it without choking.
+</div>
+</section>
+
+<!-- ===================== APPROACH ===================== -->
+<section id="approach">
+<h2>2. Technical Approach</h2>
+
+<h3>2.1 The three layers</h3>
+<table>
+<thead><tr><th>Layer</th><th>Entry point</th><th>When to use</th></tr></thead>
+<tbody>
+<tr><td>CLI-gated server (vLLM &ge; 0.17)</td>
+    <td><code>--profiler-config '{"profiler":"torch","torch_profiler_dir":"/abs/path"}'</code> + <code>POST /start_profile</code>&nbsp;/&nbsp;<code>/stop_profile</code></td>
+    <td>Current path — required for the profile router to register on 0.17+</td></tr>
+<tr><td>Env-var gated server (vLLM &le; 0.14)</td>
+    <td><code>VLLM_TORCH_PROFILER_DIR=/path</code> + <code>POST /start_profile</code>&nbsp;/&nbsp;<code>/stop_profile</code></td>
+    <td>Legacy path — silently no-ops on &ge; 0.17</td></tr>
+<tr><td>Programmatic</td>
+    <td><code>LLM.start_profile()</code>&nbsp;/&nbsp;<code>stop_profile()</code> (offline) or <code>AsyncLLMEngine.start_profile()</code>&nbsp;/&nbsp;<code>stop_profile()</code> (async)</td>
+    <td>Custom drivers / sidecar scripts</td></tr>
+<tr><td>Bench-driven</td>
+    <td><code>vllm bench serve --profile</code> (server started with one of the gates above)</td>
+    <td>Reproducible end-to-end captures</td></tr>
+</tbody>
+</table>
+
+<h3>2.2 Capture flow</h3>
+<ol>
+  <li>Pick the gate: <code>--profiler-config</code> on &ge; 0.17, or <code>VLLM_TORCH_PROFILER_DIR</code> on &le; 0.14.
+      The wrapper sets both.</li>
+  <li>Start <code>vllm serve …</code> with <code>--enforce-eager</code> (esp. on Intel XPU).</li>
+  <li><strong>Warm up</strong> outside the ROI — first call triggers CUDA graph capture, Triton/<code>torch.compile</code> autotune, KV alloc.</li>
+  <li><code>POST /start_profile</code> (or use <code>vllm bench serve --profile</code>).</li>
+  <li>Drive a tight workload: <code>--num-prompts 4–16</code>, short outputs.</li>
+  <li><code>POST /stop_profile</code> — flush happens here.</li>
+  <li>Open the <code>*.pt.trace.json</code> in Perfetto.</li>
+</ol>
+
+<div class="callout warn">
+<div class="title">Single most common failure</div>
+On 0.17+, forgetting <code>--profiler-config</code> — the endpoint 404s. On &le; 0.14,
+<code>VLLM_TORCH_PROFILER_DIR</code> was in the user's shell but not in the <strong>server's</strong>
+environment (Docker missing the env-pass). Endpoints exist but silently do nothing.
+</div>
+</section>
+
+<!-- ===================== COMMANDS ===================== -->
+<section id="commands">
+<h2>3. Commands &amp; APIs</h2>
+
+<h3>3.1 Gate (pick by vLLM version)</h3>
+<pre><code># vLLM &ge; 0.17 — pass a ProfilerConfig JSON on the CLI
+TRACE_DIR="$HOME/vllm_profile"
+mkdir -p "$TRACE_DIR"
+
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --enforce-eager \
+  --profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$TRACE_DIR\",\"torch_profiler_use_gzip\":true}"
+
+# vLLM &le; 0.14 — legacy env-var gate (silently ignored on &ge; 0.17)
+export VLLM_TORCH_PROFILER_DIR="$TRACE_DIR"
+mkdir -p "$VLLM_TORCH_PROFILER_DIR"
+vllm serve meta-llama/Llama-3.1-8B-Instruct --enforce-eager</code></pre>
+<p>The gate must be in place <em>before</em> the engine starts; the trace dir must be writable by the server uid.</p>
+
+<h3>3.2 Server + bench (recommended)</h3>
+<pre><code># Terminal 1 — server with the 0.17+ CLI gate
+export TRACE_DIR="$HOME/vllm_profile"
+mkdir -p "$TRACE_DIR"
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --enforce-eager \
+  --max-num-seqs 32 \
+  --max-num-batched-tokens 8192 \
+  --gpu-memory-utilization 0.85 \
+  --profiler-config "{\"profiler\":\"torch\",\"torch_profiler_dir\":\"$TRACE_DIR\",\"torch_profiler_use_gzip\":true}"
+
+# Terminal 2 — drives /start_profile and /stop_profile around the run
+vllm bench serve \
+  --backend openai \
+  --model meta-llama/Llama-3.1-8B-Instruct \
+  --dataset-name random \
+  --random-input-len 1024 \
+  --random-output-len 128 \
+  --num-prompts 8 \
+  --request-rate inf \
+  --profile</code></pre>
+
+<h3>3.3 HTTP endpoints directly</h3>
+<pre><code>curl -X POST http://localhost:8000/start_profile
+# ... drive traffic ...
+curl -X POST http://localhost:8000/stop_profile</code></pre>
+
+<h3>3.4 Offline <code>LLM</code> API</h3>
+<pre><code># vLLM &ge; 0.17 — construct a ProfilerConfig
+from vllm import LLM, SamplingParams
+from vllm.config import ProfilerConfig   # available on 0.17+
+
+llm = LLM(
+    model="meta-llama/Llama-3.1-8B-Instruct",
+    enforce_eager=True,
+    profiler_config=ProfilerConfig(
+        profiler="torch",
+        torch_profiler_dir="/abs/path",
+        torch_profiler_use_gzip=True,
+    ),
+)
+
+# vLLM &le; 0.14 — env var still honored offline
+# os.environ["VLLM_TORCH_PROFILER_DIR"] = "/abs/path"
+# llm = LLM(model="meta-llama/Llama-3.1-8B-Instruct", enforce_eager=True)
+
+# Warmup OUTSIDE the profile window
+llm.generate(["warmup"] * 4, SamplingParams(max_tokens=8))
+
+llm.start_profile()
+out = llm.generate(prompts, SamplingParams(max_tokens=64))
+llm.stop_profile()</code></pre>
+
+<h3>3.5 Async engine</h3>
+<pre><code>from vllm import AsyncEngineArgs, AsyncLLMEngine
+engine = AsyncLLMEngine.from_engine_args(AsyncEngineArgs(model=...))
+
+await _drive_warmup(engine)
+await engine.start_profile()
+await _drive_roi(engine)
+await engine.stop_profile()</code></pre>
+</section>
+
+<!-- ===================== SCRIPTS ===================== -->
+<section id="scripts">
+<h2>4. Scripts &amp; Recipes</h2>
+
+<p>The toolkit ships three files under <code>pytorch-profiler/scripts/</code>:</p>
+<table>
+<thead><tr><th>File</th><th>Role</th></tr></thead>
+<tbody>
+<tr><td><code>scripts/run_pt_profile_vllm.sh</code></td>
+    <td>Launcher — preflight checks, launches the wrapper with the 0.17+ <code>--profiler-config</code> flag <em>and</em> the &le; 0.14 <code>VLLM_TORCH_PROFILER_DIR</code> env var, warmup, ROI bench, <code>stop_profile</code> flush, trace inventory, summary.</td></tr>
+<tr><td><code>scripts/serve_with_pt_profile.py</code></td>
+    <td>vLLM wrapper that patches <code>vllm.v1.worker.gpu_worker.Worker.execute_model</code> with a <code>torch.profiler.record_function("vllm.&lt;phase&gt; bs=… tok=…")</code> span. Adds structured labels around vLLM's default annotations; does <strong>not</strong> drive <code>torch.profiler</code> itself — vLLM's built-in profiler owns that.</td></tr>
+<tr><td><code>scripts/summarize_trace.py</code></td>
+    <td>Post-run quantitative summary: step cadence, forward fraction, top kernels by device time, phase mix.</td></tr>
+</tbody>
+</table>
+
+<h3>4.1 Environment baked into the launcher</h3>
+<pre><code>HF_HOME=/hf_cache
+TORCH_LLM_ALLREDUCE=1
+VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+VLLM_WORKER_MULTIPROC_METHOD=spawn
+VLLM_ENGINE_READY_TIMEOUT_S=1800     # raised for vLLM 0.21 cold weight-load on NFS</code></pre>
+<p>The launcher unsets <code>ZE_ENABLE_TRACING_LAYER</code>&nbsp;/&nbsp;<code>ZE_LOADER_LAYERS_ENABLE</code>&nbsp;/&nbsp;<code>PTI_ENABLE_COLLECTION</code>&nbsp;/&nbsp;<code>PTI_ENABLE_RUNTIME_TRACING</code> — Level-Zero tracing layers left over from a VTune-style run break XPU activity capture.</p>
+
+<h3>4.2 Phase-isolated captures</h3>
+<pre><code># Prefill-heavy (long prompt, single-token completion)
+PT_PHASE=prefill INPUT_LEN=2048 OUTPUT_LEN=1 NUM_PROMPTS=8 \
+  bash run_pt_profile_vllm.sh
+
+# Decode-heavy (short prompt, long completion)
+PT_PHASE=decode INPUT_LEN=128 OUTPUT_LEN=512 NUM_PROMPTS=8 \
+  bash run_pt_profile_vllm.sh
+
+# Both (default) — mixed steps get the <code>mixed</code> label
+PT_PHASE=both bash run_pt_profile_vllm.sh</code></pre>
+<p><code>PT_LABEL_EVERY_STEP=0</code> only labels phase transitions instead of every step (cuts label spam in long captures).</p>
+
+<h3>4.3 Keeping traces small</h3>
+<ol>
+  <li><strong>Tight ROI</strong> — 1–2 prefill steps + 5–20 decode steps. Don't profile a whole bench run.</li>
+  <li><strong>Small batch / low concurrency</strong> — <code>--num-prompts 4–8</code>, short outputs.</li>
+  <li><strong><code>--enforce-eager</code></strong> — disables CUDA graphs so kernel names are real, and avoids capturing graph-build noise.</li>
+  <li><strong>gzip the traces</strong> — set <code>torch_profiler_use_gzip=true</code> in the ProfilerConfig; Perfetto reads <code>.pt.trace.json.gz</code> directly.</li>
+  <li><strong>Avoid <code>record_shapes</code> / <code>with_stack</code> / <code>profile_memory</code></strong> unless explicitly chasing those questions — they multiply trace size.</li>
+  <li><strong>TP</strong>: each rank writes its own <code>.pt.trace.json</code>; open them separately first, merge only when needed.</li>
+</ol>
+
+<h3>4.4 Annotate your own ROIs (no fork required)</h3>
+<pre><code>import torch
+with torch.profiler.record_function("my_roi"):
+    # whatever you want labeled in Perfetto
+    ...</code></pre>
+
+<h3>4.5 Cheap pre-checks before opening a multi-hundred-MB file</h3>
+<pre><code>ls -lh "$TRACE_DIR"
+
+# Peek at JSON header
+python -c "
+import sys
+with open(sys.argv[1]) as f:
+    print(f.read(2000))
+" "$TRACE_DIR"/*.pt.trace.json | head -c 2000
+
+# For .json.gz:
+zcat "$TRACE_DIR"/*.pt.trace.json.gz | head -c 2000</code></pre>
+
+<p>Look for the <code>traceEvents</code> array, <code>process_name</code>&nbsp;/&nbsp;<code>thread_name</code>
+metadata, and recognizable kernel names (<code>flash_attn</code>, <code>paged_attn</code>,
+<code>gemm</code>, <code>all_reduce</code>, <code>xetla</code> on Intel).</p>
+</section>
+
+<!-- ===================== PERFETTO ===================== -->
+<section id="perfetto">
+<h2>5. Perfetto Analysis</h2>
+
+<h3>5.1 Lane layout to expect</h3>
+<ol>
+  <li><strong>API server / asyncio</strong> — short request-handling spans (online server only).</li>
+  <li><strong>Engine / scheduler</strong> — <code>Scheduler.schedule</code>, <code>EngineCore.step</code>.</li>
+  <li><strong>Worker process(es)</strong> — one per TP rank; <code>Worker.execute_model</code> blocks per step, wrapped by the <code>vllm.&lt;phase&gt; bs=… tok=…</code> spans emitted by <code>serve_with_pt_profile.py</code>.</li>
+  <li><strong>CUDA / XPU streams</strong> — actual kernel timeline.</li>
+  <li><strong>NCCL / oneCCL streams</strong> (TP &gt; 1) — collective comms.</li>
+</ol>
+
+<h3>5.2 Identifying prefill vs. decode</h3>
+<ul>
+  <li><strong>Prefill</strong>: one-shot, large; a single <code>execute_model</code> block far wider than its neighbors. Attention time scales with <code>batch_seq_len²</code> (or <code>batch_seq_len × head_dim</code> for FlashAttention).</li>
+  <li><strong>Decode</strong>: many, small, near-uniform; cadence ~2–15 ms/step depending on hw. Sampling/logits blocks are visible and non-trivial.</li>
+</ul>
+
+<h3>5.3 Quantitative starting points</h3>
+<table>
+<thead><tr><th>Metric</th><th>Healthy range</th><th>Out-of-range means</th></tr></thead>
+<tbody>
+<tr><td>Step cadence (steady-state decode)</td><td>5–12 ms (8B fp16, modern GPU); higher on Intel BMG</td><td>Compare to model size + hw</td></tr>
+<tr><td>Forward fraction (forward kernel time / step)</td><td>&gt; 0.85 in pure decode</td><td>&lt; 0.7 → CPU/scheduler is the bottleneck</td></tr>
+<tr><td>Attention fraction within forward</td><td>0.5–0.8 long-context decode; 0.2–0.4 short-context</td><td>Backend / config issue</td></tr>
+<tr><td>NCCL / oneCCL fraction (TP only)</td><td>&lt; 0.2 steady-state</td><td>&gt; 0.2 → TP overprovisioned for batch</td></tr>
+</tbody>
+</table>
+
+<h3>5.4 Useful Perfetto features</h3>
+<ul>
+  <li><strong>Pivot Table</strong> (Query → "Slice ↦ Stats by name") — total time per kernel name.</li>
+  <li><strong>SQL on trace_processor</strong> — for traces too big to scroll:
+    <pre><code>SELECT name, COUNT(*) AS n, SUM(dur)/1e6 AS total_ms
+FROM slice WHERE category = 'kernel'
+GROUP BY name ORDER BY total_ms DESC LIMIT 20;</code></pre></li>
+  <li><strong>Flow events</strong> — connect a Python op on CPU to its dispatched kernel on GPU.</li>
+  <li><strong>Pin lanes</strong> — pin worker stream + NCCL/CCL stream side-by-side for comm/compute alignment.</li>
+</ul>
+</section>
+
+<!-- ===================== HOTSPOTS ===================== -->
+<section id="hotspots">
+<h2>6. Hotspot Patterns &amp; Pathologies</h2>
+
+<h3>6.1 What healthy hotspots look like</h3>
+<ul>
+  <li><strong>Prefill</strong>: GEMMs (QKV/FFN/LM head) and attention kernel dominate. <code>flash_attn_*</code>, paged-attention prefill paths.</li>
+  <li><strong>Decode</strong>: paged-attention decode, small-K GEMMs, <code>all_reduce</code> on TP, sampling kernels (<code>top_k</code>, <code>softmax</code>, <code>argmax</code>), norm.</li>
+</ul>
+
+<h3>6.2 Pathology table</h3>
+<table>
+<thead><tr><th>Symptom in trace</th><th>Likely cause</th><th>Where to look</th></tr></thead>
+<tbody>
+<tr><td>Long single block before any kernels</td><td>Tokenization / scheduler stall on CPU</td><td>"CPU stalls" in §5.2</td></tr>
+<tr><td>Big GPU idle between decode steps</td><td>Scheduler/Python overhead, batch too small</td><td><code>--max-num-seqs</code>, <code>--max-num-batched-tokens</code></td></tr>
+<tr><td>Attention &gt;&gt; GEMMs in decode</td><td>Wrong/legacy backend, long context not paged efficiently</td><td>Attention backend selection</td></tr>
+<tr><td>Many small <code>cudaMalloc</code>/<code>cudaFree</code></td><td>KV-cache fragmentation, gpu-mem-util too high</td><td><code>--gpu-memory-utilization</code>, <code>--block-size</code></td></tr>
+<tr><td>Tall NCCL/CCL all-reduce stripes</td><td>TP comm-bound layer, undersized batch for TP=N</td><td>Tensor-parallel section</td></tr>
+<tr><td>Draft model time ≈ target model time</td><td>Spec decode mis-tuned</td><td>Speculative decoding</td></tr>
+<tr><td>Long single block on CPU before kernels</td><td>Slow tokenizer (<code>use_fast=False</code>), guided-decoding FSM build, multimodal preprocessing</td><td>CPU lane</td></tr>
+</tbody>
+</table>
+</section>
+
+<!-- ===================== OPTIMIZATION ===================== -->
+<section id="optimization">
+<h2>7. Optimization — Trace findings → vLLM knobs</h2>
+
+<table>
+<thead><tr><th>Trace pattern</th><th>Knob to try</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>GPU idle gaps in decode</td><td><code>--max-num-seqs</code> ↑, <code>--max-num-batched-tokens</code> ↑, <code>--enable-chunked-prefill</code></td><td>Default v1 has chunked prefill on</td></tr>
+<tr><td>Allocator churn / KV fragmentation</td><td><code>--block-size 16 → 32</code>, <code>--gpu-memory-utilization 0.90 → 0.85</code></td><td>Larger blocks = less metadata, more wasted slots when seqs end</td></tr>
+<tr><td>Attention dominates decode</td><td><code>VLLM_ATTENTION_BACKEND=FLASH_ATTN</code> / <code>FLASHINFER</code> (CUDA); auto-selected on XPU</td><td>Re-capture and compare attention-fraction</td></tr>
+<tr><td>Memory-bound decode</td><td><code>--kv-cache-dtype fp8</code> / <code>int8</code></td><td>KV-cache quant matters more than weight quant for decode</td></tr>
+<tr><td>NCCL / oneCCL fraction &gt; 0.2</td><td>Lower <code>--tensor-parallel-size</code> or raise concurrency / <code>--max-num-seqs</code></td><td>Comm cost is fixed — amortize</td></tr>
+<tr><td>Spec decode underperforming</td><td>Smaller draft, lower <code>--num-speculative-tokens</code></td><td>Acceptance &gt; 50 % is the bar</td></tr>
+</tbody>
+</table>
+
+<h4>Order of changes (one knob per capture)</h4>
+<ol>
+  <li>Engine version + <code>--enforce-eager</code> for analysis sanity.</li>
+  <li>Batching (<code>--max-num-seqs</code>, <code>--max-num-batched-tokens</code>, chunked prefill).</li>
+  <li>Memory (<code>--gpu-memory-utilization</code>, <code>--block-size</code>).</li>
+  <li>Attention backend.</li>
+  <li>Quantization (weights, then KV cache).</li>
+  <li>Parallelism (TP / PP).</li>
+  <li>Speculative decoding.</li>
+</ol>
+<p>Capture between steps. Only end-to-end numbers matter.</p>
+
+<div class="callout warn">
+<div class="title">Intel XPU caveat</div>
+Quantization-related slowdowns may not be kernel issues — on bmg3 the int8 XMX kernel was fine but the
+GPU hit Burst Power Excursion, causing ~24 % freq drop. Cross-check power/thermal counters before
+blaming the kernel.
+</div>
+</section>
+
+<!-- ===================== TROUBLESHOOTING ===================== -->
+<section id="troubleshoot">
+<h2>8. Troubleshooting</h2>
+
+<h3>8.1 Trace dir empty after <code>stop_profile</code></h3>
+<ol>
+  <li><strong>vLLM &ge; 0.17:</strong> confirm <code>--profiler-config</code> was passed to <code>vllm serve</code>. The wrapper logs <code>Using --profiler-config CLI arg (vLLM &gt;= 0.17 gate)</code> when it detects the flag; if you see <code>Neither VLLM_TORCH_PROFILER_DIR nor --profiler-config is set</code>, the gate is missing.</li>
+  <li><strong>vLLM &le; 0.14:</strong> verify <code>VLLM_TORCH_PROFILER_DIR</code> is in the <strong>server's</strong> environment (not just your shell). Containers often miss it.</li>
+  <li>Dir exists and server uid can write (<code>ls -ld $TRACE_DIR</code>).</li>
+  <li><code>start_profile</code> returned 200 (curl <code>-i</code>).</li>
+  <li>Did you call <code>stop_profile</code>? Trace flushes on stop.</li>
+  <li>Process exited cleanly. <code>SIGKILL</code> mid-profile loses the buffer — use <code>SIGTERM</code>.</li>
+</ol>
+
+<h3>8.2 GPU lane is empty</h3>
+<p><strong>CUDA</strong>: CUPTI not loadable. Verify with
+<code>python -c "import torch; torch.cuda.profiler.start(); torch.cuda.profiler.stop()"</code>.
+Locked-down hosts may need <code>RmProfilingAdminOnly</code> relaxed. Inside Docker:
+<code>--cap-add=SYS_ADMIN</code> + CUPTI on <code>LD_LIBRARY_PATH</code>.</p>
+
+<p><strong>Intel XPU</strong>: torch / IPEX version mismatch silently produces CPU-only traces.
+Always launch with <code>--enforce-eager</code> on <code>intel/vllm-xpu</code>. Verify with a standalone check:</p>
+<pre><code>import torch
+from torch.profiler import profile, ProfilerActivity
+x = torch.randn(1024, 1024, device="xpu")
+with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.XPU]) as p:
+    (x @ x).sum().item()
+print(p.key_averages().table(sort_by="xpu_time_total", row_limit=5))</code></pre>
+<p>If this shows zero XPU rows, the platform side is broken — fix before involving vLLM.</p>
+
+<h3>8.3 Trace too big / Perfetto won't load</h3>
+<table>
+<thead><tr><th>Size</th><th>Action</th></tr></thead>
+<tbody>
+<tr><td>&lt; 500 MB</td><td><code>ui.perfetto.dev</code> directly</td></tr>
+<tr><td>500 MB – 2 GB</td><td>Perfetto, but slow; close other tabs</td></tr>
+<tr><td>&gt; 2 GB</td><td>Local <code>trace_processor --httpd</code></td></tr>
+</tbody>
+</table>
+<pre><code>curl -L https://get.perfetto.dev/trace_processor -o trace_processor
+chmod +x trace_processor
+./trace_processor --httpd big.pt.trace.json
+# In ui.perfetto.dev: "Connect to a trace processor instance"</code></pre>
+
+<h3>8.4 Other failures</h3>
+<table>
+<thead><tr><th>Symptom</th><th>Cause / Fix</th></tr></thead>
+<tbody>
+<tr><td><code>start_profile</code> 404 on 0.17+</td><td><code>--profiler-config</code> missing or malformed — profile router only attaches when <code>profiler_config.profiler is not None</code>. Pass a valid JSON blob.</td></tr>
+<tr><td><code>start_profile</code> 404 on &le; 0.14</td><td><code>VLLM_TORCH_PROFILER_DIR</code> unset — endpoint not registered.</td></tr>
+<tr><td>Server logs <em>"Unknown vLLM environment variable detected: VLLM_TORCH_PROFILER_DIR"</em></td><td>Running vLLM &ge; 0.17 — switch to <code>--profiler-config</code>.</td></tr>
+<tr><td>OOM during profile</td><td>Buffers + optional shape tracking add memory pressure. Drop <code>--gpu-memory-utilization</code> to 0.85, shorten ROI.</td></tr>
+<tr><td>Unreadable kernel names (<code>void at::native::elementwise_kernel&lt;…&gt;</code>)</td><td>CUDA graphs / <code>torch.compile</code> on — re-capture with <code>--enforce-eager</code>.</td></tr>
+<tr><td>Multi-rank traces don't line up</td><td>Clock-sync metadata missing — wrap a common <code>record_function("anchor")</code> on all ranks, or use <code>hta</code>.</td></tr>
+<tr><td><code>llvm-foreach SEGV</code> in SYCL JIT (BMG)</td><td>torch.compile interaction with <code>intel/vllm-xpu</code>. Launch with <code>--enforce-eager</code>.</td></tr>
+<tr><td>"Worked yesterday"</td><td>Container rebuilt (env var / CLI arg dropped), vLLM upgraded (env-var gate silently deprecated at 0.17), or driver/CUPTI/IPEX mismatch after package upgrade.</td></tr>
+</tbody>
+</table>
+</section>
+
+<!-- ===================== CONCLUSION ===================== -->
+<section id="conclusion">
+<h2>9. Conclusion</h2>
+
+<div class="callout ok">
+<div class="title">Key takeaways</div>
+<ol>
+  <li><strong>Pick the gate by version:</strong> <code>--profiler-config</code> on vLLM &ge; 0.17; <code>VLLM_TORCH_PROFILER_DIR</code> on &le; 0.14. The env var is silently ignored on 0.17+. Setting both is the safe default for cross-version scripts.</li>
+  <li><strong>Always warm up before <code>start_profile</code>.</strong> CUDA-graph capture / Triton autotune / KV alloc must be out of the ROI or steady-state numbers are wrong.</li>
+  <li><strong>Keep traces in the hundreds of MB:</strong> tight ROI, small batch, short outputs, <code>--enforce-eager</code>, gzip.</li>
+  <li><strong>Verify GPU lane is non-empty before deep analysis.</strong> CUPTI (CUDA) / Level Zero + XPU (Intel) issues silently produce CPU-only traces.</li>
+  <li><strong>Use Perfetto's pivot table or <code>trace_processor</code> SQL</strong> for kernel ranking; eyeballing is too slow for production traces.</li>
+  <li><strong>Map findings to one knob at a time</strong>, in the order: engine → batching → memory → attention → quant → parallelism → spec decode.</li>
+</ol>
+</div>
+
+<h3>9.1 Cross-skill notes</h3>
+<ul>
+  <li>For Intel Xe (BMG / PVC) + ITT-driven ROI control with VTune GPU-Hotspots, see the companion <strong>vtune</strong> skill. VTune produces <code>.vtune</code> result-dirs; PyTorch profiler produces Perfetto-readable <code>.pt.trace.json</code>.</li>
+  <li>For unitrace (pti-gpu) on Intel Xe, see the <strong>unitrace</strong> skill — same ITT ROI pattern, different collector, per-process Chrome-trace JSON.</li>
+</ul>
+
+<h3>9.2 Reference files</h3>
+<table>
+<thead><tr><th>File</th><th>Contents</th></tr></thead>
+<tbody>
+<tr><td><code>SKILL.md</code></td><td>Version-dependent gate, CLI flags, API entry points, capture recipes, Perfetto workflow.</td></tr>
+<tr><td><code>scripts/run_pt_profile_vllm.sh</code></td><td>Launcher — preflight, dual-gate wrapper launch, warmup, ROI bench, inventory, summary.</td></tr>
+<tr><td><code>scripts/serve_with_pt_profile.py</code></td><td>Wrapper that adds <code>record_function</code> spans around <code>Worker.execute_model</code> per phase.</td></tr>
+<tr><td><code>scripts/summarize_trace.py</code></td><td>Post-run trace summary: step cadence, forward fraction, top kernels.</td></tr>
+<tr><td><code>docs/setup.md</code></td><td>Full setup + config matrix (server, offline, online bench, distributed / TP).</td></tr>
+<tr><td><code>docs/perfetto-analysis.md</code></td><td>Lane layout, prefill vs decode, batching, KV-cache, NCCL / CCL, spec decode patterns.</td></tr>
+<tr><td><code>docs/optimization.md</code></td><td>Mapping trace findings to vLLM config changes.</td></tr>
+<tr><td><code>docs/troubleshooting.md</code></td><td>Trace empty, GPU lane empty, trace too big, CUPTI / XPU issues, 0.17 env-var deprecation.</td></tr>
+</tbody>
+</table>
+
+<h3>9.3 Validated environment</h3>
+<ul>
+  <li>Host: <code>gnrsp-bmg3.iind.intel.com</code></li>
+  <li>Containers: <code>intel/vllm:0.14.1-xpu</code> (env-var gate), <code>intel/vllm:0.17.0-xpu</code> and <code>intel/vllm:0.21.0-ubuntu24.04</code> (CLI gate). See <code>verification_log_vllm_0.21.md</code> in the toolkit repo.</li>
+  <li>Reference run: <code>MODEL=meta-llama/Llama-3.1-8B-Instruct PT_PHASE=decode INPUT_LEN=128 OUTPUT_LEN=512 NUM_PROMPTS=8 ./run_pt_profile_vllm.sh</code></li>
+</ul>
+
+<h3>9.4 Authoritative source</h3>
+<p><a href="https://docs.vllm.ai/en/stable/contributing/profiling/profiling_index.html">docs.vllm.ai — profiling index</a></p>
+</section>
+
+<footer>
+Generated from <code>vllm-xpu-profiling-toolkit/pytorch-profiler/</code> — SKILL.md + docs/setup.md + docs/perfetto-analysis.md + docs/optimization.md + docs/troubleshooting.md.
+Targets vLLM v1 (0.14 / 0.17 / 0.21) with the <code>torch.profiler</code> integration; vendor-agnostic across NVIDIA CUDA and Intel XPU.
+Source: <a href="https://github.com/Vasud-ha/vllm-xpu-profiling-toolkit">github.com/Vasud-ha/vllm-xpu-profiling-toolkit</a>.
+</footer>
+
+</main>
+</div>
+</body>
+</html>

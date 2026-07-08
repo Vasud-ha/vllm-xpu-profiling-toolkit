@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VTune + vLLM Conditional Profiling on Intel Xe — Technical Report</title>
+<style>
+  :root {
+    --bg:#0e1116; --panel:#161b22; --panel-2:#1c2128; --border:#30363d;
+    --text:#e6edf3; --muted:#8b949e; --accent:#58a6ff; --accent-2:#79c0ff;
+    --success:#3fb950; --warn:#d29922; --err:#f85149;
+    --code-bg:#0d1117; --code-fg:#c9d1d9; --kbd-bg:#21262d; --table-row:#1a1f26;
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; padding:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;
+    font-size:15px; line-height:1.6; }
+  .layout { display:grid; grid-template-columns:260px 1fr; min-height:100vh; }
+  nav.toc { background:var(--panel); border-right:1px solid var(--border);
+    padding:24px 16px; position:sticky; top:0; height:100vh; overflow-y:auto; }
+  nav.toc h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em;
+    color:var(--muted); margin:0 0 12px 0; }
+  nav.toc ol { list-style:none; padding:0; margin:0; counter-reset:toc; }
+  nav.toc li { counter-increment:toc; margin:4px 0; }
+  nav.toc li::before { content:counter(toc) "."; color:var(--muted);
+    margin-right:6px; font-variant-numeric:tabular-nums; }
+  nav.toc a { color:var(--text); text-decoration:none; font-size:14px; }
+  nav.toc a:hover { color:var(--accent-2); }
+  main { padding:36px 48px; max-width:1100px; }
+  header.hero { border-bottom:1px solid var(--border); padding-bottom:20px; margin-bottom:28px; }
+  header.hero h1 { font-size:28px; margin:0 0 6px 0; color:var(--accent-2); }
+  header.hero .subtitle { color:var(--muted); font-size:15px; }
+  .badges { margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; }
+  .badge { display:inline-block; padding:3px 10px; border-radius:999px;
+    background:var(--panel-2); border:1px solid var(--border); font-size:12px;
+    color:var(--muted); }
+  .badge.accent  { color:var(--accent);  border-color:rgba(88,166,255,.4); }
+  .badge.success { color:var(--success); border-color:rgba(63,185,80,.4); }
+  .badge.warn    { color:var(--warn);    border-color:rgba(210,153,34,.4); }
+  h2 { font-size:22px; margin:40px 0 10px 0; padding-bottom:6px;
+    border-bottom:1px solid var(--border); color:var(--accent-2); }
+  h3 { font-size:17px; margin:22px 0 6px 0; }
+  h4 { font-size:14px; text-transform:uppercase; letter-spacing:.05em;
+    margin:16px 0 4px 0; color:var(--muted); }
+  p { margin:6px 0 10px 0; }
+  ul,ol { margin:6px 0 10px 0; padding-left:22px; }
+  li { margin:3px 0; }
+  a { color:var(--accent); }
+  code { font-family:"SF Mono","Menlo","Consolas",monospace; font-size:13px;
+    background:var(--kbd-bg); padding:2px 6px; border-radius:4px; color:var(--accent-2); }
+  pre { font-family:"SF Mono","Menlo","Consolas",monospace; font-size:13px;
+    background:var(--code-bg); color:var(--code-fg); border:1px solid var(--border);
+    border-radius:6px; padding:12px 14px; overflow-x:auto; margin:10px 0; }
+  pre code { background:none; padding:0; color:inherit; }
+  table { border-collapse:collapse; width:100%; margin:10px 0 14px 0; font-size:14px; }
+  th,td { border:1px solid var(--border); padding:7px 11px; text-align:left; vertical-align:top; }
+  th { background:var(--panel-2); color:var(--accent-2); font-weight:600; }
+  tr:nth-child(even) td { background:var(--table-row); }
+  .callout { border-left:4px solid var(--accent); background:var(--panel);
+    padding:10px 14px; margin:12px 0; border-radius:0 6px 6px 0; }
+  .callout.warn { border-left-color:var(--warn); }
+  .callout.err  { border-left-color:var(--err); }
+  .callout.ok   { border-left-color:var(--success); }
+  .callout .title { font-weight:600; color:var(--accent-2); margin-bottom:3px; }
+  .callout.warn .title { color:var(--warn); }
+  .callout.err  .title { color:var(--err); }
+  .callout.ok   .title { color:var(--success); }
+  .flow {
+    font-family:"SF Mono","Menlo","Consolas",monospace; font-size:12.5px;
+    color:var(--code-fg); background:var(--code-bg); border:1px solid var(--border);
+    border-radius:6px; padding:14px 16px; margin:10px 0; white-space:pre;
+    overflow-x:auto;
+  }
+  footer { margin-top:48px; padding-top:14px; border-top:1px solid var(--border);
+    color:var(--muted); font-size:13px; }
+  @media (max-width:900px) { .layout { grid-template-columns:1fr; }
+    nav.toc { position:static; height:auto; } main { padding:20px; } }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#summary">Summary</a></li>
+    <li><a href="#approach">Technical Approach</a></li>
+    <li><a href="#install">Install &amp; Setup</a></li>
+    <li><a href="#commands">Launch &amp; ROI Commands</a></li>
+    <li><a href="#itt-vllm">ITT + vLLM Integration</a></li>
+    <li><a href="#scripts">Scripts</a></li>
+    <li><a href="#results">Results &amp; Validation</a></li>
+    <li><a href="#troubleshoot">Troubleshooting</a></li>
+    <li><a href="#conclusion">Conclusion</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<header class="hero">
+  <h1>VTune + vLLM Conditional Profiling on Intel Xe</h1>
+  <div class="subtitle">ROI-gated GPU-Hotspots profiling for vLLM serving on Intel Xe / Xe2 (BMG, PVC) — start VTune paused, drive collection via <code>vtune -command</code> or ITT <code>__itt_resume</code>/<code>__itt_pause</code>, capture only the inference window.</div>
+  <div class="badges">
+    <span class="badge accent">Intel VTune Profiler 2024.x / 2025.x</span>
+    <span class="badge accent">vLLM v1 (≥ 0.10)</span>
+    <span class="badge accent">Intel Xe — BMG / PVC</span>
+    <span class="badge success">GPU-Hotspots</span>
+    <span class="badge warn">-start-paused + ITT resume/pause</span>
+  </div>
+  <p style="margin-top:14px;color:var(--muted);font-size:14px;">
+    <strong>Authoritative sources:</strong>
+    Download — <a href="https://www.intel.com/content/www/us/en/developer/tools/oneapi/vtune-profiler-download.html">Intel VTune Profiler download</a> ·
+    Docs — <a href="https://www.intel.com/content/www/us/en/developer/tools/oneapi/vtune-profiler-documentation.html">VTune Profiler documentation hub</a> ·
+    <a href="https://www.intel.com/content/www/us/en/docs/vtune-profiler/user-guide/current/overview.html">User Guide</a> ·
+    <a href="https://www.intel.com/content/www/us/en/docs/vtune-profiler/user-guide/current/gpu-compute-media-hotspots-analysis-group.html">GPU-Hotspots analysis</a> ·
+    <a href="https://www.intel.com/content/www/us/en/docs/vtune-profiler/user-guide/current/instrumentation-and-tracing-technology-apis.html">ITT API reference</a>
+  </p>
+</header>
+
+<!-- ===================== SUMMARY ===================== -->
+<section id="summary">
+<h2>1. Summary</h2>
+<p>
+Profiling a full vLLM stack with VTune in default mode produces 10–50&nbsp;GB of trace data
+dominated by Python startup, model load, JIT compilation, tokenizer overhead and warmup. The
+steady-state inference kernels — the actual subject of analysis — are buried in noise.
+</p>
+<p>This skill defines a reproducible <strong>conditional / ROI profiling</strong> flow that:</p>
+<ul>
+  <li>Starts VTune <em>paused</em> via <code>-start-paused</code>, so model load and JIT compiles are excluded.</li>
+  <li>Drives collection via external <code>vtune -command resume / pause / stop</code> <em>or</em> in-process
+      ITT API (<code>__itt_resume</code> / <code>__itt_pause</code>).</li>
+  <li>Patches <code>vllm.v1.worker.gpu_worker.Worker.execute_model</code> so the ROI sits at the tightest
+      correct boundary — pure GPU compute, no HTTP/asyncio/tokenizer leakage.</li>
+  <li>Synchronizes the XPU queue (<code>torch.xpu.synchronize()</code>) before pause to guarantee every
+      kernel submitted inside the ROI is captured.</li>
+</ul>
+<div class="callout ok">
+  <div class="title">Quantitative outcome</div>
+  Result size drops from 10–50&nbsp;GB to 100&nbsp;MB&nbsp;–&nbsp;2&nbsp;GB; kernel attribution becomes
+  high; warmup contamination is eliminated; GUI analysis time falls from minutes to seconds.
+</div>
+<p><strong>Validated on</strong> <code>gnrsp-bmg3.iind.intel.com</code> against:</p>
+<ul>
+  <li><code>intel/vllm:0.14.1-xpu</code> (<code>vllm 0.1.dev14456+gde3f7fe65</code>) — original validation environment.</li>
+  <li><code>intel/vllm:0.17.0-xpu</code> — re-validated in container <code>unitrace_vllm_test_vasu</code>; the ROI flow,
+      ITT symbol resolution, and VTune result structure behave identically. No script changes required.</li>
+  <li><code>intel/vllm:0.21.0-ubuntu24.04</code> — re-validated in container <code>skill-test-vasu</code>; see
+      <code>verification_log_vllm_0.21.md</code> in the toolkit repo. VTune 2025.x is preflight-blocked on BMG
+      (libigdmd.so gap); use VTune 2026.0 or switch to unitrace for BMG kernel attribution.</li>
+</ul>
+<p>Validation base: oneAPI 2025.3, kernel 6.17, Intel Graphics <code>[0xe223]</code> (BMG / Xe2), VTune 2025.x / 2026.0.</p>
+</section>
+
+<!-- ===================== APPROACH ===================== -->
+<section id="approach">
+<h2>2. Technical Approach</h2>
+
+<h3>2.1 Global vs ROI</h3>
+<table>
+<thead><tr><th>Metric</th><th>Global profiling</th><th>Conditional / ROI</th></tr></thead>
+<tbody>
+<tr><td>Result size</td><td>10–50 GB</td><td>100 MB – 2 GB</td></tr>
+<tr><td>GPU timeline noise</td><td>Very high</td><td>Minimal</td></tr>
+<tr><td>Warmup contamination</td><td>Always</td><td>None</td></tr>
+<tr><td>Analysis time in GUI</td><td>Minutes</td><td>Seconds</td></tr>
+<tr><td>Kernel attribution</td><td>Low</td><td>High</td></tr>
+</tbody>
+</table>
+
+<h3>2.2 ROI control contract</h3>
+<div class="flow">benchmark script (curl / OpenAI SDK / vllm bench serve)
+      |
+      | vtune -command resume   (or __itt_resume from inside Worker.execute_model)
+      v
+VTune driver  ──►  starts collecting GPU-Hotspots samples + L0 API timeline
+      |
+      | ... inference traffic ...
+      |
+      | vtune -command pause    (or __itt_pause from inside Worker.execute_model)
+      v
+VTune driver  ──►  stops collecting; result remains open
+      |
+      | vtune -command stop
+      v
+VTune driver  ──►  finalize result-dir (resolve symbols, write index)</div>
+
+<h3>2.3 Why each control step is needed</h3>
+<table>
+<thead><tr><th>Step</th><th>Reason</th></tr></thead>
+<tbody>
+<tr><td><code>-start-paused</code> at exec</td><td>Model load + JIT generates 10–30 s of GPU activity that is NOT inference and dominates hotspot rankings.</td></tr>
+<tr><td>Process tree under one vtune driver</td><td>vLLM v1 splits the engine across processes. Only descendants of the vtune driver are reachable by <code>vtune -command resume</code>. Always launch via <code>vtune -- python …</code>, never attach after the fact.</td></tr>
+<tr><td>Warmup remains paused</td><td>First runs through any new shape compile SYCL/IPEX kernels; those compile events crowd out steady-state hotspots.</td></tr>
+<tr><td><code>torch.xpu.synchronize()</code> before pause</td><td>XPU submissions return immediately; if pause fires before kernels finish, VTune misses the actual GPU work. Most common cause of "empty trace".</td></tr>
+<tr><td><code>-command stop</code></td><td>Pause leaves the result open. Stop finalizes — writes index, resolves symbols, closes file handles.</td></tr>
+</tbody>
+</table>
+
+<div class="callout warn">
+<div class="title">External command vs ITT — when to use which</div>
+<strong>External</strong> (<code>vtune -command resume/pause</code>) — process-tree-wide, no code changes, perfect for benchmark drivers.
+<strong>ITT</strong> (<code>__itt_resume</code> / <code>__itt_pause</code>) — per-process; in vLLM v1 you must call it from inside the EngineCore/Worker subprocess, not the API parent. Use it for step-level task tagging or when you can't run an external driver.
+</div>
+</section>
+
+<!-- ===================== INSTALL ===================== -->
+<section id="install">
+<h2>3. Install &amp; Setup</h2>
+
+<p>Two install paths — pick one:</p>
+<ul>
+  <li><strong>oneAPI Base Toolkit</strong> (most servers) — ships VTune at
+      <code>/opt/intel/oneapi/vtune/latest/</code>.</li>
+  <li><strong>Standalone VTune Profiler</strong> — download from
+      <a href="https://www.intel.com/content/www/us/en/developer/tools/oneapi/vtune-profiler-download.html">intel.com/.../vtune-profiler-download.html</a>
+      (Linux / Windows / macOS host UI; Linux for collection).</li>
+</ul>
+
+<h3>3.1 Quick install — oneAPI Base Toolkit (Ubuntu)</h3>
+<pre><code>wget https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
+sudo apt-key add GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB
+echo "deb https://apt.repos.intel.com/oneapi all main" | sudo tee /etc/apt/sources.list.d/oneAPI.list
+sudo apt update
+sudo apt install intel-oneapi-vtune
+
+# every shell session:
+source /opt/intel/oneapi/setvars.sh
+vtune --version    # expect 2024.x or 2025.x</code></pre>
+
+<h3>3.2 Quick install — standalone VTune</h3>
+<pre><code># From the download page above, grab vtune_profiler_2025.x.x.tgz, then:
+tar xzf vtune_profiler_2025.*.tgz
+cd vtune_profiler_2025.*
+./install.sh                          # interactive, installs to /opt/intel/vtune_profiler
+source /opt/intel/vtune_profiler/vtune-vars.sh
+vtune --version</code></pre>
+
+<h3>3.3 Required system prerequisites (Linux GPU collection)</h3>
+<table>
+<thead><tr><th>Item</th><th>Why</th><th>Check</th></tr></thead>
+<tbody>
+<tr><td><code>libdrm</code> + <code>/dev/dri/render*</code> nodes</td><td>VTune talks to the GPU via DRM render node</td><td><code>ls /dev/dri/render*</code></td></tr>
+<tr><td>User in <code>render</code> group</td><td>Permission to open render node</td><td><code>id -nG | grep render</code></td></tr>
+<tr><td><code>intel-level-zero-gpu</code> + <code>intel-opencl-icd</code></td><td>Level Zero runtime</td><td><code>sycl-ls | grep -i gpu</code></td></tr>
+<tr><td>VTune-compatible GPU driver</td><td>Avoid sampler skew + missing EU events</td><td>Match VTune release notes for the kernel/driver tested</td></tr>
+<tr><td><code>libittnotify.so</code> from VTune</td><td>ITT API integration</td><td><code>ls $VTUNE_PROFILER_DIR/lib64/libittnotify.so</code></td></tr>
+</tbody>
+</table>
+
+<h3>3.4 vLLM ITT helper</h3>
+<pre><code>pip install ittapi    # Intel official Python bindings — optional; ctypes fallback works too</code></pre>
+
+<h3>3.5 Documentation entry points</h3>
+<ul>
+  <li><a href="https://www.intel.com/content/www/us/en/developer/tools/oneapi/vtune-profiler-documentation.html">VTune Profiler documentation hub</a> — release notes, system requirements, install guides.</li>
+  <li><a href="https://www.intel.com/content/www/us/en/docs/vtune-profiler/user-guide/current/overview.html">VTune User Guide</a> — full command/knob reference.</li>
+  <li><a href="https://www.intel.com/content/www/us/en/docs/vtune-profiler/user-guide/current/gpu-compute-media-hotspots-analysis-group.html">GPU Compute / Media Hotspots Analysis</a> — knob matrix, metric definitions.</li>
+  <li><a href="https://www.intel.com/content/www/us/en/docs/vtune-profiler/user-guide/current/instrumentation-and-tracing-technology-apis.html">Instrumentation and Tracing Technology (ITT) APIs</a> — resume/pause, task/domain/frame APIs.</li>
+  <li><a href="https://www.intel.com/content/www/us/en/docs/vtune-profiler/cookbook/current/overview.html">VTune Cookbook</a> — recipe-style examples for common analyses.</li>
+</ul>
+</section>
+
+<!-- ===================== COMMANDS ===================== -->
+<section id="commands">
+<h2>4. Launch &amp; ROI Commands</h2>
+
+<h3>4.1 Command cheat sheet</h3>
+<pre><code>vtune &lt;-action&gt; [-action-option] [-global-option] [[--] &lt;target&gt; [target-options]]
+
+# Run analysis
+vtune -collect gpu-hotspots [options] -- &lt;target&gt;
+  -r, -result-dir=&lt;str&gt;        Result directory path
+  -start-paused                Start collection paused, resume later   &lt;-- KEY FLAG
+  -resume-after=&lt;seconds&gt;      Delay collection N seconds after start
+  -k, -knob=&lt;str&gt;              Analysis-specific modifier (repeatable)
+
+# Control running analysis
+vtune -command pause   -r &lt;result-dir&gt;
+vtune -command resume  -r &lt;result-dir&gt;
+vtune -command stop    -r &lt;result-dir&gt;
+vtune -command status  -r &lt;result-dir&gt;
+vtune -command mark    -r &lt;result-dir&gt; -message "..."
+
+# Headless reports
+vtune -report summary       -r &lt;result-dir&gt; [-format csv]
+vtune -report hotspots      -r &lt;result-dir&gt; -group-by computing-task -format csv -limit 25
+vtune -report hw-events     -r &lt;result-dir&gt; -group-by computing-task -format csv
+# `-report tasks` was renamed to `-report top-tasks` in VTune 2026:
+vtune -report top-tasks     -r &lt;result-dir&gt; -format csv</code></pre>
+
+<h3>4.2 Basic launch — GPU-Hotspots, start paused</h3>
+<pre><code>vtune \
+  -collect gpu-hotspots \
+  -start-paused \
+  -result-dir ./vtune_results/vllm_roi \
+  -- python -m vllm.entrypoints.openai.api_server \
+       --model meta-llama/Llama-3.1-8B-Instruct \
+       --port 8000 --dtype bfloat16 --enforce-eager</code></pre>
+
+<h3>4.3 Useful knobs for Xe / BMG</h3>
+<table>
+<thead><tr><th>Knob</th><th>Values</th><th>Purpose</th></tr></thead>
+<tbody>
+<tr><td><code>profiling-mode</code></td><td><code>characterization</code> (default) / <code>source-analysis</code></td><td><code>source-analysis</code> enables EU-stall / instruction-level attribution, one kernel at a time.</td></tr>
+<tr><td><code>characterization-mode</code></td><td><code>overview</code>, <code>global-local-accesses</code>, <code>instruction-count</code>, <code>dynamic-instruction-count</code>, <code>full-compute</code></td><td>Sub-mode under <code>characterization</code>.</td></tr>
+<tr><td><code>computing-task-of-interest</code></td><td><code>&lt;kernel-name&gt;</code></td><td>Restrict source-analysis to one kernel.</td></tr>
+<tr><td><code>gpu-sampling-interval</code></td><td>float ms (default 1.0)</td><td>EU sampling rate.</td></tr>
+<tr><td><code>collect-programming-api</code></td><td><code>true</code> / <code>false</code></td><td>Capture Level Zero / SYCL / OpenCL API timeline.</td></tr>
+<tr><td><code>collect-host-gpu-data-transfers</code></td><td><code>true</code> / <code>false</code></td><td>H2D / D2H copies.</td></tr>
+<tr><td><code>enable-gpu-runtimes</code></td><td><code>true</code> / <code>false</code></td><td>Per-runtime breakdown.</td></tr>
+</tbody>
+</table>
+
+<div class="callout warn">
+<div class="title">Pitfall — invalid knobs</div>
+The CPU-collector knobs <code>sampling-interval</code> and <code>enable-stack-collection</code> are
+NOT valid for <code>gpu-hotspots</code> and fail with <em>"Cannot find knob …"</em>. Verify with
+<code>vtune -help collect gpu-hotspots</code>.
+</div>
+
+<h3>4.4 External collection control (most reliable for vLLM)</h3>
+<pre><code># Terminal 1 — launch vLLM under VTune, paused
+export VTUNE_RESULT=$(realpath ./vtune_results/run_$(date +%Y%m%d_%H%M%S))
+vtune -collect gpu-hotspots -start-paused -result-dir $VTUNE_RESULT \
+  -- python -m vllm.entrypoints.openai.api_server \
+       --model meta-llama/Llama-3.1-8B-Instruct --port 8000 --enforce-eager &amp;
+
+# Terminal 2 — benchmark driver brackets the ROI
+sleep 30                                       # wait for server + warmup
+vtune -command resume -r $VTUNE_RESULT         # ROI start
+vllm bench serve --base-url http://localhost:8000 --num-prompts 20
+vtune -command pause  -r $VTUNE_RESULT         # ROI end
+vtune -command stop   -r $VTUNE_RESULT         # finalize</code></pre>
+</section>
+
+<!-- ===================== ITT + VLLM ===================== -->
+<section id="itt-vllm">
+<h2>5. ITT + vLLM Integration</h2>
+
+<h3>5.1 ITT API surface</h3>
+<pre><code>Control:
+  __itt_resume()          // resume ALL collection (process-global)
+  __itt_pause()           // pause ALL collection
+
+Task / domain (timeline annotations):
+  __itt_domain_create()
+  __itt_task_begin()
+  __itt_task_end()</code></pre>
+<p>Full reference:
+<a href="https://www.intel.com/content/www/us/en/docs/vtune-profiler/user-guide/current/instrumentation-and-tracing-technology-apis.html">ITT API documentation</a>.</p>
+
+<h3>5.2 ctypes wrapper (zero deps)</h3>
+<pre><code>import ctypes, ctypes.util, os, contextlib
+
+_SEARCH = [
+  "/opt/intel/oneapi/vtune/latest/lib64/libittnotify.so",
+  "/opt/intel/vtune_profiler/lib64/libittnotify.so",
+  os.path.join(os.environ.get("VTUNE_PROFILER_DIR", ""), "lib64/libittnotify.so"),
+]
+def _load():
+    n = ctypes.util.find_library("ittnotify")
+    if n:
+        try: return ctypes.CDLL(n)
+        except OSError: pass
+    for p in _SEARCH:
+        if p and os.path.exists(p):
+            try: return ctypes.CDLL(p)
+            except OSError: continue
+    return None
+
+_lib = _load()
+_resume = getattr(_lib, "__itt_resume", None) if _lib else None
+_pause  = getattr(_lib, "__itt_pause",  None) if _lib else None
+
+def itt_available(): return _resume is not None
+def itt_resume():    _resume and _resume()
+def itt_pause():     _pause  and _pause()
+
+@contextlib.contextmanager
+def vtune_roi():
+    import torch
+    itt_resume()
+    try: yield
+    finally:
+        if torch.xpu.is_available(): torch.xpu.synchronize()
+        itt_pause()</code></pre>
+
+<h3>5.3 vLLM v1 specifics</h3>
+<table>
+<thead><tr><th>Concern</th><th>v0 (legacy)</th><th>v1 (current, incl. <code>intel/vllm:0.14.1-xpu</code> &amp; <code>0.17.0-xpu</code>)</th></tr></thead>
+<tbody>
+<tr><td>Worker class</td><td><code>vllm.worker.worker.Worker</code></td><td><code>vllm.v1.worker.gpu_worker.Worker</code></td></tr>
+<tr><td>Engine</td><td><code>LLMEngine</code> (in-process)</td><td><code>EngineCore</code> subprocess (multi-proc)</td></tr>
+<tr><td><code>execute_model</code> arg</td><td><code>ExecuteModelRequest</code></td><td><code>SchedulerOutput</code></td></tr>
+<tr><td>API server <code>main()</code></td><td>exported</td><td><strong>NOT</strong> exported — invoke via <code>python -m</code> or <code>runpy</code></td></tr>
+<tr><td>ITT scope</td><td>n/a</td><td>must init ITT in the engine/worker subprocess, not the API parent</td></tr>
+</tbody>
+</table>
+
+<h3>5.4 Where to put the ROI</h3>
+<pre><code>HTTP POST /v1/completions
+  |  [API parent process]
+AsyncLLM.generate()                       (asyncio)
+  |  [IPC: ZMQ → EngineCore subprocess]
+EngineCore.step()                          (scheduler + KV cache)
+  |
+  +-- model_executor.execute_model(scheduler_output)
+        |  [GPU worker process(es): one per TP rank]
+      Worker.execute_model(scheduler_output)   ◄── BEST ROI BOUNDARY
+        |
+        +-- model.forward(...)                  ◄── tightest boundary (per-step)</code></pre>
+
+<h3>5.5 Monkey-patch sketch</h3>
+<pre><code>import functools, torch
+from vllm.v1.worker.gpu_worker import Worker
+from vtune_itt import itt_resume, itt_pause
+
+_orig_exec = Worker.execute_model
+
+@functools.wraps(_orig_exec)
+def _exec_with_roi(self, scheduler_output, *args, **kwargs):
+    itt_resume()
+    try:
+        out = _orig_exec(self, scheduler_output, *args, **kwargs)
+    finally:
+        torch.xpu.synchronize()
+        itt_pause()
+    return out
+
+Worker.execute_model = _exec_with_roi</code></pre>
+<p>Phase tags (prefill / decode) can be layered on top using <code>__itt_task_begin/end</code> with the
+<code>scheduler_output</code>'s <code>scheduled_new_reqs</code> / <code>scheduled_cached_reqs</code> to classify.</p>
+
+<h3>5.6 ITT overhead</h3>
+<table>
+<thead><tr><th>Call</th><th>VTune attached</th><th>VTune not running</th></tr></thead>
+<tbody>
+<tr><td><code>__itt_resume</code> / <code>__itt_pause</code> (C)</td><td>50–200 ns</td><td>2–5 ns</td></tr>
+<tr><td><code>ittapi.resume()</code> (Python pkg)</td><td>300–800 ns</td><td>10–20 ns</td></tr>
+<tr><td>ctypes wrapper</td><td>500 ns – 2 µs</td><td>20–50 ns</td></tr>
+<tr><td><code>torch.xpu.synchronize()</code></td><td>1–50 µs (queue-depth dependent)</td><td>N/A</td></tr>
+</tbody>
+</table>
+<p>For LLM inference (forward = 10–500 ms), per-step ITT + sync overhead is &lt; 0.5 %.</p>
+</section>
+
+<!-- ===================== SCRIPTS ===================== -->
+<section id="scripts">
+<h2>6. Scripts</h2>
+
+<p>Two files comprise the production wrapper (mirrors the unitrace skill layout):</p>
+<ul>
+  <li><code>scripts/serve_with_vtune.py</code> — vLLM server wrapper; installs the
+      <code>Worker.execute_model</code> ROI monkey-patch.</li>
+  <li><code>scripts/run_vtune_vllm.sh</code> — driver: <code>vtune -collect gpu-hotspots -start-paused</code> +
+      benchmark loop bracketed by <code>vtune -command resume/pause/stop</code>.</li>
+</ul>
+
+<h3>6.1 <code>run_vtune_vllm.sh</code> skeleton</h3>
+<pre><code>#!/usr/bin/env bash
+set -euo pipefail
+source /opt/intel/oneapi/setvars.sh --force
+
+MODEL=${MODEL:-meta-llama/Llama-3.1-8B-Instruct}
+PORT=${PORT:-8000}
+PHASE=${VTUNE_PHASE:-decode}            # prefill | decode | mixed
+INPUT_LEN=${INPUT_LEN:-512}
+OUTPUT_LEN=${OUTPUT_LEN:-256}
+NUM_PROMPTS=${NUM_PROMPTS:-20}
+
+STAMP=$(date +%Y%m%d_%H%M%S)
+RESULT=$(realpath ./vtune_results/${STAMP}_${PHASE})
+mkdir -p "$RESULT"
+
+# 1. Launch vLLM under VTune, paused
+vtune -collect gpu-hotspots -start-paused -result-dir "$RESULT" \
+  -knob characterization-mode=overview \
+  -knob collect-programming-api=true \
+  -- python -m vllm.entrypoints.openai.api_server \
+       --model "$MODEL" --port "$PORT" --dtype float16 --enforce-eager \
+       --max-model-len 4352 --max-num-batched-tokens 4352 &amp;
+SERVER_PID=$!
+
+# 2. Wait for /v1/models
+for i in $(seq 1 600); do
+  curl -sf http://localhost:$PORT/v1/models >/dev/null 2>&amp;1 &amp;&amp; break
+  sleep 1
+done
+
+# 3. Bracket the ROI
+vtune -command resume -r "$RESULT"
+vllm bench serve --base-url http://localhost:$PORT --model "$MODEL" \
+     --num-prompts "$NUM_PROMPTS" --max-concurrency 1 \
+     --random-input-len "$INPUT_LEN" --random-output-len "$OUTPUT_LEN" \
+   | tee "$RESULT/bench.log"
+vtune -command pause -r "$RESULT"
+
+# 4. Shut down vLLM, finalize VTune
+kill -INT $SERVER_PID
+wait $SERVER_PID 2>/dev/null || true
+vtune -command stop -r "$RESULT"
+
+# 5. Headless reports
+vtune -report summary  -r "$RESULT" -format csv  > "$RESULT/summary.csv"
+vtune -report hotspots -r "$RESULT" -group-by computing-task -format csv -limit 25 \
+                                                  > "$RESULT/hotspots.csv"
+
+echo "result: $RESULT"</code></pre>
+
+<h3>6.2 Baseline vs candidate diff</h3>
+<pre><code>BASE=./vtune_results/baseline
+CAND=./vtune_results/candidate
+for D in $BASE $CAND; do
+  vtune -report hotspots -r "$D" -group-by computing-task -format csv -limit 30 > "$D/hotspots.csv"
+done
+
+python3 - &lt;&lt;'PY'
+import csv, os
+def load(p):
+    with open(p) as f:
+        return {r['Computing Task']: float(r.get('GPU Time', 0) or 0)
+                for r in csv.DictReader(f) if r.get('Computing Task')}
+b, c = load(f"{os.environ['BASE']}/hotspots.csv"), load(f"{os.environ['CAND']}/hotspots.csv")
+keys = sorted(set(b)|set(c), key=lambda k: -(c.get(k,0) - b.get(k,0)))
+print(f"{'kernel':&lt;60} {'base(s)':&gt;10} {'cand(s)':&gt;10} {'delta(s)':&gt;10}")
+for k in keys[:25]:
+    print(f"{k[:60]:&lt;60} {b.get(k,0):&gt;10.3f} {c.get(k,0):&gt;10.3f} {c.get(k,0)-b.get(k,0):&gt;+10.3f}")
+PY</code></pre>
+</section>
+
+<!-- ===================== RESULTS ===================== -->
+<section id="results">
+<h2>7. Results &amp; Validation</h2>
+
+<h3>7.1 Post-collection checks (5 in order)</h3>
+<table>
+<thead><tr><th>#</th><th>Check</th><th>Command</th><th>Pass criterion</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Result is finalized</td><td><code>ls -la $RESULT</code></td><td><code>config.cfg</code>, <code>data.0/</code>, <code>log/</code>, <code>runss/</code> present</td></tr>
+<tr><td>2</td><td>Non-zero GPU time</td><td><code>vtune -report summary -r $RESULT | grep 'GPU Time'</code></td><td>&gt; 0 and within ±20 % of expected ROI duration</td></tr>
+<tr><td>3</td><td>Hotspots are GPU kernels</td><td><code>vtune -report hotspots -r $RESULT -group-by computing-task -format csv -limit 10</code></td><td>Top entries are <code>xetla_gemm_*</code>, <code>flash_attn_*</code>, <code>_decode_*</code> — not Python frames</td></tr>
+<tr><td>4</td><td>ROI duration matches wall-clock</td><td><code>vtune -report summary -r $RESULT | grep 'Elapsed Time'</code></td><td>Within ±20 % of benchmark wall-clock</td></tr>
+<tr><td>5</td><td>Phase tags present (if ITT used)</td><td><code>vtune-gui $RESULT</code> → Tasks tab</td><td>Domains <code>vllm.prefill</code> / <code>vllm.decode</code> with task_count &gt; 0</td></tr>
+</tbody>
+</table>
+
+<h3>7.2 Healthy-trace cheat sheet (BMG, Llama-3.1-8B)</h3>
+<table>
+<thead><tr><th>Phase</th><th>GPU Time / step</th><th>EU Active</th><th>EU Stall</th><th>GPU Mem BW</th><th>Top kernel</th></tr></thead>
+<tbody>
+<tr><td><strong>Prefill</strong> (BS=1, seq_len ~512)</td><td>30–80 ms</td><td>50–80 %</td><td>10–25 %</td><td>30–60 %</td><td><code>xetla_gemm_*</code>, <code>flash_attn_varlen_*</code></td></tr>
+<tr><td><strong>Decode</strong> (BS=1)</td><td>15–40 ms</td><td>10–30 % <em>(low is correct)</em></td><td>40–70 %</td><td>70–95 %</td><td><code>xetla_gemv_*</code> OR <code>_decode_attn_*</code></td></tr>
+</tbody>
+</table>
+
+<h3>7.3 Red-flag hotspot patterns</h3>
+<table>
+<thead><tr><th>Pattern</th><th>Phase</th><th>Cause</th></tr></thead>
+<tbody>
+<tr><td><code>aten::copy_*</code> in top 5</td><td>Prefill</td><td>KV-cache layout / dtype mismatch on prompt feed</td></tr>
+<tr><td>Single <code>xetla_gemm_*</code> &gt; 70 % of step</td><td>Prefill</td><td>Batch shape stuck on a slow path; toggle <code>--enforce-eager</code></td></tr>
+<tr><td>EU Active &lt; 30 % in prefill</td><td>Prefill</td><td>ROI captured warmup or stalled kernel</td></tr>
+<tr><td>EU Active &gt; 50 % in decode</td><td>Decode</td><td>ROI captured prefill mislabeled, or batch jumped &gt; 1</td></tr>
+<tr><td>GPU Memory BW &lt; 50 % in decode</td><td>Decode</td><td>BW-bound work not fully feeding EUs; KV layout / contention</td></tr>
+<tr><td>H2D/D2H per step &gt; 4</td><td>Decode</td><td>Sampler params / block-table re-uploaded each step — cache them</td></tr>
+<tr><td>Big kernel only in first profiled step</td><td>Either</td><td>JIT first-touch leaked into ROI — add throwaway requests after resume</td></tr>
+<tr><td><code>&lt;unknown&gt;</code> symbols in top 10</td><td>Either</td><td>AOT kernels missing debug info; see Troubleshooting §8</td></tr>
+</tbody>
+</table>
+
+<h3>7.4 BMG-specific notes</h3>
+<ul>
+  <li><strong>Decode is BW-bound</strong> — expect 10–40 % EU utilization. Correct, not a profiling failure.</li>
+  <li><strong>Prefill is compute-bound</strong> — expect 50–80 % EU utilization for long sequences.</li>
+  <li><strong><code>--enforce-eager</code> is required</strong> on <code>intel/vllm-xpu</code> to avoid the llvm-foreach SEGV in SYCL JIT and to get clearer kernel names.</li>
+  <li><strong>Phase ratio</strong>: at BS=1, <code>prefill_GPU_time : decode_GPU_time_per_token ≈ seq_len / 8</code>. A 512-token prompt with 256-token response → decode dominates ≈ 99 % of GPU time. Profile prefill and decode in <em>separate</em> runs for clean attribution.</li>
+</ul>
+</section>
+
+<!-- ===================== TROUBLESHOOTING ===================== -->
+<section id="troubleshoot">
+<h2>8. Troubleshooting</h2>
+
+<table>
+<thead><tr><th>Symptom</th><th>Root cause</th><th>Fix</th></tr></thead>
+<tbody>
+<tr>
+  <td>GPU Time = 0</td>
+  <td>Collection paused before GPU kernels completed</td>
+  <td>Add <code>torch.xpu.synchronize()</code> immediately before <code>itt_pause()</code> / <code>vtune -command pause</code></td>
+</tr>
+<tr>
+  <td>Empty GPU timeline</td>
+  <td>Conflicting tracing layer enabled (PTI / extra L0 layers)</td>
+  <td><code>unset ZE_ENABLE_TRACING_LAYER ZE_LOADER_LAYERS_ENABLE PTI_ENABLE_COLLECTION PTI_ENABLE_RUNTIME_TRACING</code></td>
+</tr>
+<tr>
+  <td>Huge CPU time, tiny GPU fraction</td>
+  <td>ROI too wide — captures HTTP / asyncio / tokenizer</td>
+  <td>Move ROI inward: <code>AsyncLLMEngine.generate</code> → <code>EngineCore.step</code> → <code>Worker.execute_model</code> → <code>model.forward</code></td>
+</tr>
+<tr>
+  <td>Result file &gt; 10 GB</td>
+  <td>Too much data captured</td>
+  <td>Set <code>-knob collect-programming-api=false</code>, <code>-knob collect-host-gpu-data-transfers=false</code>, raise <code>-knob gpu-sampling-interval=5</code>, or profile fewer requests</td>
+</tr>
+<tr>
+  <td>ITT calls do nothing</td>
+  <td>(a) lib not found, (b) <code>-start-paused</code> missing, (c) vLLM launched outside vtune, (d) <code>LD_PRELOAD</code> conflict</td>
+  <td>Set <code>VTUNE_PROFILER_DIR</code> / extend <code>LD_LIBRARY_PATH</code>; always use <code>vtune -- python …</code>; check the wrapper logs <code>ITT available: True</code> in both the API parent and the engine subprocess</td>
+</tr>
+<tr>
+  <td><code>vtune -command</code> fails: "no collection"</td>
+  <td>Path mismatch or vLLM crashed at startup</td>
+  <td>Reuse the same <code>$VTUNE_RESULT</code> variable everywhere; check <code>vtune -command status -r $RESULT</code> and <code>ps aux | grep vllm</code></td>
+</tr>
+<tr>
+  <td>Unreadable kernel names (<code>&lt;unknown&gt;</code>)</td>
+  <td>AOT-compiled XPU kernels without debug symbols</td>
+  <td>For custom SYCL: <code>icpx -fsycl -gline-tables-only -O2</code>. In GUI: add PyTorch-XPU / IPEX build paths under <em>Configure Analysis → Search Directories</em></td>
+</tr>
+<tr>
+  <td>EU stall metrics missing</td>
+  <td>Default GPU-Hotspots uses time sampling, not source-level</td>
+  <td>Switch to <code>-knob profiling-mode=source-analysis</code> + <code>-knob computing-task-of-interest=&lt;kernel&gt;</code></td>
+</tr>
+<tr>
+  <td>Multi-rank: one rank not profiled</td>
+  <td>ITT is per-process; external command resumes only the vtune-owned tree</td>
+  <td>Patch <code>Worker.execute_model</code> so each rank calls ITT itself; ensure all ranks are descendants of the same <code>vtune -- python …</code> invocation</td>
+</tr>
+<tr>
+  <td><code>llvm-foreach SEGV</code> in SYCL JIT (BMG)</td>
+  <td>torch.compile interaction with <code>intel/vllm-xpu</code></td>
+  <td>Launch vLLM with <code>--enforce-eager</code></td>
+</tr>
+</tbody>
+</table>
+
+<h3>8.1 Pre-flight script</h3>
+<pre><code>#!/usr/bin/env bash
+source /opt/intel/oneapi/setvars.sh 2>/dev/null
+echo "VTUNE_PROFILER_DIR: ${VTUNE_PROFILER_DIR:-NOT SET}"
+
+env | grep -E "^(ZE_ENABLE_TRACING|ZE_LOADER_LAYERS|PTI_ENABLE)" | head -5 \
+  &amp;&amp; echo "WARNING: conflicting env vars above" || echo "ZE env vars: clean"
+
+sycl-ls 2>/dev/null | grep -i gpu || echo "  no GPU"
+python3 -c "import torch; print(f'  XPU count: {torch.xpu.device_count()}')" 2>/dev/null
+vtune --version 2>/dev/null | head -1 || echo "vtune not in PATH"
+ls $VTUNE_PROFILER_DIR/lib64/libittnotify.so 2>/dev/null \
+  || echo "libittnotify NOT FOUND"
+id -nG | grep -q render &amp;&amp; echo "render group: OK" \
+  || echo "render group: MISSING — sudo usermod -aG render $USER"</code></pre>
+</section>
+
+<!-- ===================== CONCLUSION ===================== -->
+<section id="conclusion">
+<h2>9. Conclusion</h2>
+
+<div class="callout ok">
+<div class="title">Key takeaways</div>
+<ol>
+  <li><strong>VTune + <code>-start-paused</code> + ROI control ≡ clean trace.</strong> Without all three, you're back to a multi-GB whole-lifetime trace.</li>
+  <li><strong>Launch under VTune, never attach after the fact</strong> — vLLM v1's split topology (API parent + EngineCore subprocess + per-rank Workers) requires umbrella ownership of all descendants.</li>
+  <li><strong>Always sync before pause.</strong> <code>torch.xpu.synchronize()</code> is the single most important correctness rule; without it, in-flight kernels are missed.</li>
+  <li><strong>Always validate post-run:</strong> GPU Time &gt; 0, top hotspots are real GPU kernels, ROI duration matches benchmark wall-clock within ±20 %.</li>
+  <li><strong>Decode that looks under-utilized (10–30 % EU) is not a bug</strong> — decode is BW-bound by physics.</li>
+  <li><strong>Use a hybrid ROI:</strong> external <code>vtune -command resume/pause</code> bracketing the whole window; per-step ITT task tags inside it for phase lanes.</li>
+</ol>
+</div>
+
+<h3>9.1 Reference files</h3>
+<table>
+<thead><tr><th>File</th><th>Contents</th></tr></thead>
+<tbody>
+<tr><td><code>SKILL.md</code></td><td>Architecture, cheat sheet, quick-start, workflow.</td></tr>
+<tr><td><code>scripts/serve_with_vtune.py</code></td><td>vLLM wrapper installing the <code>Worker.execute_model</code> ITT monkey-patch.</td></tr>
+<tr><td><code>scripts/run_vtune_vllm.sh</code></td><td>VTune launcher + benchmark driver + headless reports.</td></tr>
+<tr><td><code>scripts/vtune_itt.py</code></td><td>ITT ctypes wrapper (<code>__itt_resume</code> / <code>__itt_pause</code>) + <code>vtune_roi</code> context manager with pre-pause <code>torch.xpu.synchronize()</code>.</td></tr>
+<tr><td><code>docs/itt-api.md</code></td><td>ITT API bindings, ctypes wrapper, task/domain API, overhead.</td></tr>
+<tr><td><code>docs/troubleshooting.md</code></td><td>Empty timelines, ZE conflicts, sync issues, env checklist, GUI validation.</td></tr>
+<tr><td><code>docs/vllm-integration.md</code></td><td>Monkey-patch patterns, per-step vs batched ROI, phase classification.</td></tr>
+<tr><td><code>docs/validation-and-flow.txt</code></td><td>Annotated capture timeline, pre-flight + post-run verification checks.</td></tr>
+</tbody>
+</table>
+
+<h3>9.2 Validated environment</h3>
+<ul>
+  <li>Host: <code>gnrsp-bmg3.iind.intel.com</code></li>
+  <li>Containers: <code>intel/vllm:0.14.1-xpu</code> (original) and <code>intel/vllm:0.17.0-xpu</code> (re-validated, identical behavior).</li>
+  <li>VTune Profiler 2025.x at <code>/opt/intel/oneapi/vtune/latest/</code>.</li>
+  <li>Reference run: <code>MODEL=meta-llama/Llama-3.1-8B-Instruct VTUNE_PHASE=prefill INPUT_LEN=2048 OUTPUT_LEN=1 NUM_PROMPTS=20 MAX_CONCURRENCY=1 ./run_vtune_vllm.sh</code></li>
+</ul>
+
+<h3>9.3 Authoritative sources</h3>
+<ul>
+  <li><strong>Download:</strong> <a href="https://www.intel.com/content/www/us/en/developer/tools/oneapi/vtune-profiler-download.html">Intel VTune Profiler download</a></li>
+  <li><strong>Documentation hub:</strong> <a href="https://www.intel.com/content/www/us/en/developer/tools/oneapi/vtune-profiler-documentation.html">vtune-profiler-documentation.html</a></li>
+  <li><strong>User Guide:</strong> <a href="https://www.intel.com/content/www/us/en/docs/vtune-profiler/user-guide/current/overview.html">User Guide overview</a></li>
+  <li><strong>GPU-Hotspots:</strong> <a href="https://www.intel.com/content/www/us/en/docs/vtune-profiler/user-guide/current/gpu-compute-media-hotspots-analysis-group.html">GPU Compute / Media Hotspots Analysis</a></li>
+  <li><strong>ITT API:</strong> <a href="https://www.intel.com/content/www/us/en/docs/vtune-profiler/user-guide/current/instrumentation-and-tracing-technology-apis.html">ITT API reference</a></li>
+  <li><strong>Cookbook:</strong> <a href="https://www.intel.com/content/www/us/en/docs/vtune-profiler/cookbook/current/overview.html">VTune Cookbook</a></li>
+</ul>
+</section>
+
+<footer>
+Generated from <code>vllm-xpu-profiling-toolkit/vtune/</code> — targets Intel VTune Profiler 2024.x / 2025.x / 2026.0 and vLLM v1 (≥ 0.10, incl. 0.21) on Intel Xe (BMG / PVC) GPUs.
+Source: <a href="https://github.com/Vasud-ha/vllm-xpu-profiling-toolkit">github.com/Vasud-ha/vllm-xpu-profiling-toolkit</a>.
+</footer>
+
+</main>
+</div>
+</body>
+</html>

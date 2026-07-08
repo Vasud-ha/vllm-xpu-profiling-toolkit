@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>unitrace + vLLM Conditional Profiling on Intel Xe — Technical Report</title>
+<style>
+  :root {
+    --bg:#0e1116; --panel:#161b22; --panel-2:#1c2128; --border:#30363d;
+    --text:#e6edf3; --muted:#8b949e; --accent:#58a6ff; --accent-2:#79c0ff;
+    --success:#3fb950; --warn:#d29922; --err:#f85149;
+    --code-bg:#0d1117; --code-fg:#c9d1d9; --kbd-bg:#21262d; --table-row:#1a1f26;
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; padding:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Helvetica Neue",Arial,sans-serif;
+    font-size:15px; line-height:1.6; }
+  .layout { display:grid; grid-template-columns:260px 1fr; min-height:100vh; }
+  nav.toc { background:var(--panel); border-right:1px solid var(--border);
+    padding:24px 16px; position:sticky; top:0; height:100vh; overflow-y:auto; }
+  nav.toc h2 { font-size:13px; text-transform:uppercase; letter-spacing:.08em;
+    color:var(--muted); margin:0 0 12px 0; }
+  nav.toc ol { list-style:none; padding:0; margin:0; counter-reset:toc; }
+  nav.toc li { counter-increment:toc; margin:4px 0; }
+  nav.toc li::before { content:counter(toc) "."; color:var(--muted);
+    margin-right:6px; font-variant-numeric:tabular-nums; }
+  nav.toc a { color:var(--text); text-decoration:none; font-size:14px; }
+  nav.toc a:hover { color:var(--accent-2); }
+  main { padding:36px 48px; max-width:1100px; }
+  header.hero { border-bottom:1px solid var(--border); padding-bottom:20px; margin-bottom:28px; }
+  header.hero h1 { font-size:28px; margin:0 0 6px 0; color:var(--accent-2); }
+  header.hero .subtitle { color:var(--muted); font-size:15px; }
+  .badges { margin-top:12px; display:flex; gap:8px; flex-wrap:wrap; }
+  .badge { display:inline-block; padding:3px 10px; border-radius:999px;
+    background:var(--panel-2); border:1px solid var(--border); font-size:12px;
+    color:var(--muted); }
+  .badge.accent  { color:var(--accent);  border-color:rgba(88,166,255,.4); }
+  .badge.success { color:var(--success); border-color:rgba(63,185,80,.4); }
+  .badge.warn    { color:var(--warn);    border-color:rgba(210,153,34,.4); }
+  h2 { font-size:22px; margin:40px 0 10px 0; padding-bottom:6px;
+    border-bottom:1px solid var(--border); color:var(--accent-2); }
+  h3 { font-size:17px; margin:22px 0 6px 0; }
+  h4 { font-size:14px; text-transform:uppercase; letter-spacing:.05em;
+    margin:16px 0 4px 0; color:var(--muted); }
+  p { margin:6px 0 10px 0; }
+  ul,ol { margin:6px 0 10px 0; padding-left:22px; }
+  li { margin:3px 0; }
+  a { color:var(--accent); }
+  code { font-family:"SF Mono","Menlo","Consolas",monospace; font-size:13px;
+    background:var(--kbd-bg); padding:2px 6px; border-radius:4px; color:var(--accent-2); }
+  pre { font-family:"SF Mono","Menlo","Consolas",monospace; font-size:13px;
+    background:var(--code-bg); color:var(--code-fg); border:1px solid var(--border);
+    border-radius:6px; padding:12px 14px; overflow-x:auto; margin:10px 0; }
+  pre code { background:none; padding:0; color:inherit; }
+  table { border-collapse:collapse; width:100%; margin:10px 0 14px 0; font-size:14px; }
+  th,td { border:1px solid var(--border); padding:7px 11px; text-align:left; vertical-align:top; }
+  th { background:var(--panel-2); color:var(--accent-2); font-weight:600; }
+  tr:nth-child(even) td { background:var(--table-row); }
+  .callout { border-left:4px solid var(--accent); background:var(--panel);
+    padding:10px 14px; margin:12px 0; border-radius:0 6px 6px 0; }
+  .callout.warn { border-left-color:var(--warn); }
+  .callout.err  { border-left-color:var(--err); }
+  .callout.ok   { border-left-color:var(--success); }
+  .callout .title { font-weight:600; color:var(--accent-2); margin-bottom:3px; }
+  .callout.warn .title { color:var(--warn); }
+  .callout.err  .title { color:var(--err); }
+  .callout.ok   .title { color:var(--success); }
+  .flow {
+    font-family:"SF Mono","Menlo","Consolas",monospace; font-size:12.5px;
+    color:var(--code-fg); background:var(--code-bg); border:1px solid var(--border);
+    border-radius:6px; padding:14px 16px; margin:10px 0; white-space:pre;
+    overflow-x:auto;
+  }
+  footer { margin-top:48px; padding-top:14px; border-top:1px solid var(--border);
+    color:var(--muted); font-size:13px; }
+  @media (max-width:900px) { .layout { grid-template-columns:1fr; }
+    nav.toc { position:static; height:auto; } main { padding:20px; } }
+</style>
+</head>
+<body>
+<div class="layout">
+
+<nav class="toc">
+  <h2>Contents</h2>
+  <ol>
+    <li><a href="#summary">Summary</a></li>
+    <li><a href="#approach">Technical Approach</a></li>
+    <li><a href="#build">Build</a></li>
+    <li><a href="#commands">Launch &amp; ROI Commands</a></li>
+    <li><a href="#scripts">Scripts</a></li>
+    <li><a href="#results">Results &amp; Hotspots</a></li>
+    <li><a href="#troubleshoot">Troubleshooting</a></li>
+    <li><a href="#bmg-matrix">BMG Option Support Matrix</a></li>
+    <li><a href="#conclusion">Conclusion</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<header class="hero">
+  <h1>unitrace + vLLM Conditional Profiling on Intel Xe</h1>
+  <div class="subtitle">Build, install, and run Intel <code>pti-gpu</code> <strong>unitrace</strong> against vLLM serving workloads on Intel Xe / Xe2 (BMG) GPUs, with ITT-driven <code>/start_profile</code> and <code>/stop_profile</code> endpoints so any HTTP client can bracket the ROI.</div>
+  <div class="badges">
+    <span class="badge accent">Intel pti-gpu unitrace</span>
+    <span class="badge accent">vLLM v1</span>
+    <span class="badge accent">Intel Xe / Xe2 (BMG)</span>
+    <span class="badge accent">Level Zero + SYCL + ITT</span>
+    <span class="badge success">Chrome trace JSON</span>
+    <span class="badge warn">--start-paused + ITT resume/pause</span>
+  </div>
+  <p style="margin-top:14px;color:var(--muted);font-size:14px;">
+    <strong>Authoritative source:</strong>
+    <a href="https://github.com/intel/pti-gpu/tree/master/tools/unitrace">github.com/intel/pti-gpu/tree/master/tools/unitrace</a>
+    — upstream README, build instructions, and option reference.
+  </p>
+</header>
+
+<!-- ===================== SUMMARY ===================== -->
+<section id="summary">
+<h2>1. Summary</h2>
+<p>
+<strong>unitrace</strong> (<a href="https://github.com/intel/pti-gpu/tree/master/tools/unitrace">intel/pti-gpu</a>)
+hooks Level Zero (and optionally OpenCL / SYCL / oneCCL / oneDNN) at runtime and writes a Chrome-trace
+JSON per process, plus an aggregated device-timing summary at exit.
+Capturing the entire vLLM server lifetime is wasteful (model load, KV alloc, warmup, idle ticks all land
+in the trace), so this skill drives a <strong>conditional ROI</strong>:
+</p>
+<ul>
+  <li>Launch with <code>unitrace --start-paused</code>.</li>
+  <li>Replace vLLM's torch-profiler-backed <code>/start_profile</code> + <code>/stop_profile</code> with
+      ITT-driven equivalents (<code>__itt_resume</code> / <code>__itt_pause</code>) plus a filesystem
+      gate file for cross-process glue.</li>
+  <li>Patch <code>vllm.v1.worker.gpu_worker.Worker.execute_model</code> so the worker subprocess re-checks
+      the gate file every step and toggles its own ITT state — belt-and-suspenders.</li>
+</ul>
+<p>Validated on <code>gnrsp-bmg3.iind.intel.com</code> against:</p>
+<ul>
+  <li><code>intel/vllm:0.14.1-xpu</code> (<code>vllm 0.1.dev14456+gde3f7fe65</code>) — original validation environment.</li>
+  <li><code>intel/vllm:0.17.0-xpu</code> — re-validated in container <code>unitrace_vllm_test_vasu</code>; the ROI flow, ITT symbol resolution, and Chrome-trace output behave identically. No script changes were required.</li>
+  <li><code>intel/vllm:0.21.0-ubuntu24.04</code> — re-validated in container <code>skill-test-vasu</code>; see <code>verification_log_vllm_0.21.md</code> in the toolkit repo. <code>--metric-query</code> path (<code>ComputeBasic</code>, <code>DeviceCacheProfile</code>, <code>VectorEngineStalls</code>, etc.) works on BMG here; only <code>--stall-sampling</code> still doesn't propagate into the spawned EngineCore.</li>
+</ul>
+<p>Validation base: oneAPI 2025.3, kernel 6.17, Intel Graphics <code>[0xe223]</code> (BMG / Xe2), unitrace 2.3.0.</p>
+</section>
+
+<!-- ===================== APPROACH ===================== -->
+<section id="approach">
+<h2>2. Technical Approach</h2>
+
+<h3>2.1 Why ROI matters</h3>
+<p>Without ROI gating, the trace covers the whole server lifetime — load_format, KV-cache allocation,
+warmup, chat-template processing, idle scheduler ticks. With <code>--start-paused</code> + ITT calls,
+unitrace records only the inference window — the same control mechanism VTune uses.</p>
+
+<h3>2.2 ROI control contract</h3>
+<div class="flow">client (curl / OpenAI SDK / vllm bench serve)
+      |
+      | POST /start_profile
+      v
+FastAPI handler   ──►  __itt_resume()      ──►  unitrace begins capture
+      |                + create gate file
+      |
+      | ... inference traffic ...
+      |
+      | POST /stop_profile
+      v
+FastAPI handler   ──►  torch.xpu.synchronize()
+                  ──►  __itt_pause()       ──►  unitrace stops capture
+                  ──►  remove gate file</div>
+
+<h3>2.3 Why the gate file</h3>
+<p>vLLM v1 spawns the EngineCore in a subprocess; ITT calls in the API-server process don't reach the
+worker. The gate file is the cross-process glue: a patched <code>Worker.execute_model</code> in the worker
+process re-checks it every step and toggles its own <code>__itt_resume</code> / <code>__itt_pause</code>
+around the kernel launches.</p>
+
+<h3>2.4 ITT symbol resolution</h3>
+<p>The <code>intel/vllm:0.14.1-xpu</code> container has <strong>no</strong> <code>libittnotify.so</code> —
+only the static <code>.a</code> from pti-gpu. unitrace itself compiles <code>ittnotify_static.c</code> into
+<code>libunitrace_tool.so</code> and forwards <code>__itt_resume</code> / <code>__itt_pause</code> from
+there. The wrapper resolves symbols in this order:</p>
+<ol>
+  <li><code>RTLD_DEFAULT</code> — unitrace already injected via <code>LD_PRELOAD</code>.</li>
+  <li><code>libunitrace_tool.so</code> by absolute path with <code>RTLD_GLOBAL</code> (covers running outside unitrace).</li>
+  <li><code>find_library("ittnotify")</code> — last-resort fallback for VTune installs.</li>
+</ol>
+<pre><code>$ nm -D libunitrace_tool.so | grep -E '__itt_resume|__itt_pause'
+00000000000fc940 T __itt_pause
+00000000000fcaf0 T __itt_pause_scoped
+00000000000fcb00 T __itt_resume
+00000000000fccb0 T __itt_resume_scoped</code></pre>
+
+<div class="callout warn">
+<div class="title">Important</div>
+Always combine <code>--start-paused</code> with the ITT calls. Without <code>--start-paused</code>,
+ITT pause/resume just toggles whether the existing collection is "active" — it does <em>not</em>
+reduce the captured-data window for the whole trace.
+</div>
+</section>
+
+<!-- ===================== BUILD ===================== -->
+<section id="build">
+<h2>3. Build (Linux, BMG / Xe2)</h2>
+
+<p>Requires CMake ≥ 3.22, C++17, oneAPI Base Toolkit, Python ≥ 3.9.</p>
+<pre><code>git clone --depth 1 https://github.com/intel/pti-gpu.git
+cd pti-gpu/tools/unitrace
+mkdir build &amp;&amp; cd build
+
+source /opt/intel/oneapi/setvars.sh --force
+
+cmake -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_WITH_MPI=0 \
+      -DBUILD_WITH_ITT=1 \
+      -DBUILD_WITH_XPTI=1 \
+      -DBUILD_WITH_OPENCL=1 \
+      ..
+make -j$(nproc)</code></pre>
+
+<p>Artifacts:</p>
+<ul>
+  <li><code>build/unitrace</code> — launcher binary.</li>
+  <li><code>build/libunitrace_tool.so</code> — injected into the target process; <strong>must stay alongside the binary</strong>.</li>
+  <li><code>build/ittapi/bin/libittnotify.a</code> — static ITT lib unitrace links against.</li>
+</ul>
+
+<h3>3.1 BMG/Xe2 build break — <code>(uintptr_t)(val)</code> cast on struct handle</h3>
+<p>Newer Level Zero headers (oneAPI 2025.3 / recent <code>compute-runtime</code>) make
+<code>ze_ipc_event_counter_based_handle_t</code> a struct, but pti-gpu's generator emits a C-style
+<code>(uintptr_t)(val)</code> cast inside <code>TO_HEX_STRING</code> that fails:</p>
+<pre><code>tracing.gen: error: invalid cast from type 'ze_ipc_event_counter_based_handle_t'
+{aka '_ze_ipc_event_counter_based_handle_t'} to type 'uintptr_t'
+  7 |     std::sprintf(buffer, "0x%lx", (uintptr_t)(val)); \
+    |                                   ^~~~~~~~~~~~~~~~</code></pre>
+
+<p><strong>Fix</strong> — patch <code>scripts/gen_tracing_callbacks.py::gen_to_hex_string_functions</code>
+to emit a templated helper that dispatches on type traits:</p>
+
+<pre><code>f.write("#include &lt;type_traits&gt;\n")
+f.write("template &lt;typename T&gt;\n")
+f.write("static inline uintptr_t to_hex_value_(const T&amp; v) {\n")
+f.write("  if constexpr (std::is_pointer_v&lt;T&gt;) {\n")
+f.write("    return reinterpret_cast&lt;uintptr_t&gt;(v);\n")
+f.write("  } else if constexpr (std::is_integral_v&lt;T&gt; || std::is_enum_v&lt;T&gt;) {\n")
+f.write("    return static_cast&lt;uintptr_t&gt;(v);\n")
+f.write("  } else {\n")
+f.write("    uintptr_t out = 0;\n")
+f.write("    std::memcpy(&amp;out, &amp;v, sizeof(v) &lt; sizeof(out) ? sizeof(v) : sizeof(out));\n")
+f.write("    return out;\n")
+f.write("  }\n")
+f.write("}\n")
+f.write("#define TO_HEX_STRING(str, val) \\\n")
+f.write("    {char buffer[32]; \\\n")
+f.write("    std::sprintf(buffer, \"0x%lx\", (unsigned long)to_hex_value_(val)); \\\n")
+f.write("    str += std::string(buffer); \\\n")
+f.write("    }\n")</code></pre>
+
+<p>Then regenerate and rebuild:</p>
+<pre><code>cd build
+rm -f tracing.gen common_header.gen l0_loader.gen
+make -j$(nproc)</code></pre>
+
+<h3>3.2 Other build gotchas</h3>
+<table>
+<thead><tr><th>Symptom</th><th>Cause / Fix</th></tr></thead>
+<tbody>
+<tr><td><code>fatal: could not create work tree dir 'pti-gpu': File exists</code> (NFS-squashed empty dir)</td><td><code>rmdir pti-gpu</code> then re-clone (works because the squashed dir is empty)</td></tr>
+<tr><td>Build artifacts owned by <code>nobody:nogroup</code></td><td>NFS root-squash; harmless inside the container, can't <code>chown</code></td></tr>
+<tr><td><code>fatal: detected dubious ownership in repository</code></td><td>Harmless — just skips embedding git commit hash. Silence with <code>git config --global --add safe.directory '*'</code></td></tr>
+<tr><td><code>has modification time N s in the future</code></td><td>Container clock vs. NFS mtime mismatch — ignore unless followed by an actual missing artifact</td></tr>
+</tbody>
+</table>
+</section>
+
+<!-- ===================== COMMANDS ===================== -->
+<section id="commands">
+<h2>4. Launch &amp; ROI Commands</h2>
+
+<h3>4.1 Two-file launcher</h3>
+<ul>
+  <li><code>scripts/serve_with_unitrace.py</code> — vLLM wrapper with ITT-driven endpoints.</li>
+  <li><code>scripts/run_unitrace_vllm.sh</code> — <code>unitrace --start-paused</code> entrypoint, with an
+  <code>EXIT</code> trap that auto-runs <code>generate_report.py</code> against <code>$RESULT_DIR</code>.</li>
+</ul>
+
+<h3>4.2 Default unitrace flags</h3>
+<pre><code>--start-paused
+-d                          # device-timing summary at exit
+--chrome-kernel-logging     # GPU kernels in Chrome trace
+--chrome-sycl-logging       # SYCL runtime calls
+--chrome-itt-logging        # ITT API regions (so /start_profile shows up)</code></pre>
+
+<h3>4.3 Preset matrix (<code>UNITRACE_PRESET</code>)</h3>
+<p>Always-on under any preset: <code>--start-paused -d --chrome-itt-logging</code>.
+Setting <code>UNITRACE_FLAGS</code> directly overrides everything; <code>UNITRACE_EXTRA</code> appends verbatim.</p>
+
+<table>
+<thead><tr><th>Preset</th><th>Adds</th><th>Use it for</th><th>Cost</th></tr></thead>
+<tbody>
+<tr><td><code>lite</code></td><td><code>--chrome-kernel-logging</code></td><td>Smallest trace; GPU kernels + ROI markers only. First-pass / large benchmarks.</td><td>low</td></tr>
+<tr><td><code>default</code></td><td>kernel + sycl</td><td>Adds SYCL runtime / UR plugin calls — see what host is doing between launches.</td><td>medium</td></tr>
+<tr><td><code>call</code></td><td>default + <code>--chrome-call-logging</code></td><td>Trace L0/OpenCL host API calls. Use when host overhead is the suspect.</td><td>medium-high</td></tr>
+<tr><td><code>ccl</code></td><td>default + <code>--chrome-ccl-logging</code></td><td>Multi-rank / TP &gt; 1 / DP runs through oneCCL.</td><td>medium</td></tr>
+<tr><td><code>dnn</code></td><td>default + <code>--chrome-dnn-logging</code></td><td>oneDNN primitives (some SDPA / fused ops).</td><td>medium</td></tr>
+<tr><td><code>mpi</code></td><td>default + <code>--chrome-mpi-logging</code></td><td>Multi-node MPI runs.</td><td>medium</td></tr>
+<tr><td><code>device</code></td><td><code>--chrome-device-logging</code></td><td>Device activities only — small traces.</td><td>low</td></tr>
+<tr><td><code>full</code></td><td>kernel + device + sycl + ccl + dnn + mpi + call + <code>--verbose</code></td><td>Maximum visibility for one-off deep dives. Big traces — keep ROI tight.</td><td>high</td></tr>
+</tbody>
+</table>
+
+<h3>4.4 Per-flag reference</h3>
+<table>
+<thead><tr><th>Flag</th><th>Traces</th><th>When to use</th></tr></thead>
+<tbody>
+<tr><td><code>--chrome-kernel-logging</code></td><td>GPU + host kernel activities</td><td>Almost always. The default GPU timeline.</td></tr>
+<tr><td><code>--chrome-device-logging</code></td><td>Device-side activities only</td><td>Smaller trace when you don't need per-thread/per-engine info.</td></tr>
+<tr><td><code>--chrome-sycl-logging</code></td><td>SYCL runtime + UR plugin</td><td>Gap analysis between kernel launches.</td></tr>
+<tr><td><code>--chrome-call-logging</code></td><td>L0 / OpenCL host calls</td><td>Investigating dispatch overhead, command-list builds, sync waits.</td></tr>
+<tr><td><code>--chrome-itt-logging</code></td><td>ITT resume/pause events</td><td>Always on. Surfaces ROI markers on the timeline.</td></tr>
+<tr><td><code>--chrome-ccl-logging</code></td><td>oneCCL collectives</td><td>Multi-rank / TP / DP runs.</td></tr>
+<tr><td><code>--chrome-dnn-logging</code></td><td>oneDNN primitives</td><td>Workloads that lower into oneDNN.</td></tr>
+<tr><td><code>--chrome-mpi-logging</code></td><td>MPI calls</td><td>Multi-node MPI runs.</td></tr>
+<tr><td><code>--chrome-no-thread-on-device</code></td><td>(modifier) drop per-thread breakdown for device events</td><td>Reduce trace size.</td></tr>
+<tr><td><code>--chrome-no-engine-on-device</code></td><td>(modifier) drop per-L0-engine breakdown</td><td>Reduce trace size.</td></tr>
+<tr><td><code>--chrome-event-buffer-size &lt;N&gt;</code></td><td>Per-host-thread event buffer</td><td>Cap memory in long captures (<code>1000000</code> ≈ 1M events/thread).</td></tr>
+</tbody>
+</table>
+
+<h3>4.5 Examples</h3>
+<pre><code># Tight GPU-only trace (fast, small)
+UNITRACE_PRESET=lite bash run_unitrace_vllm.sh
+
+# Multi-rank/TP run with allreduce visibility
+TP_SIZE=2 UNITRACE_PRESET=ccl bash run_unitrace_vllm.sh
+
+# Hunting host overhead — show every L0 dispatch call
+UNITRACE_PRESET=call bash run_unitrace_vllm.sh
+
+# Verbose + 1M-event buffer cap
+UNITRACE_EXTRA="--verbose --chrome-event-buffer-size 1000000" bash run_unitrace_vllm.sh
+
+# Smaller traces by dropping per-thread / per-engine subdivision
+UNITRACE_EXTRA="--chrome-no-thread-on-device --chrome-no-engine-on-device" \
+  bash run_unitrace_vllm.sh
+
+# Show me everything (big traces — keep ROI short)
+UNITRACE_PRESET=full bash run_unitrace_vllm.sh
+
+# Manual override — full control, ignores preset
+UNITRACE_FLAGS="--start-paused -d --chrome-kernel-logging --chrome-call-logging" \
+  bash run_unitrace_vllm.sh</code></pre>
+
+<h3>4.6 Driving the ROI</h3>
+<pre><code>PORT=9090
+
+# 1. Start ROI
+curl -X POST http://localhost:$PORT/start_profile
+
+# 2. Issue inference — any client works
+curl -X POST http://localhost:$PORT/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"meta-llama/Llama-3.1-8B-Instruct",
+       "messages":[{"role":"user","content":"San Francisco is a"}],
+       "max_tokens":24}'
+
+# 3. Stop ROI
+curl -X POST http://localhost:$PORT/stop_profile
+
+# 4. Stop the server (Ctrl-C). unitrace flushes the trace and prints
+#    the device-timing summary to stdout. The launcher's EXIT trap
+#    auto-runs generate_report.py against $RESULT_DIR.</code></pre>
+
+<div class="callout err">
+<div class="title">Don't use <code>--</code> separator</div>
+<code>unitrace -- python …</code> rejects the <code>--</code>. Just <code>unitrace &lt;flags&gt; python …</code>.
+</div>
+</section>
+
+<!-- ===================== SCRIPTS ===================== -->
+<section id="scripts">
+<h2>5. Scripts</h2>
+
+<table>
+<thead><tr><th>File</th><th>Role</th></tr></thead>
+<tbody>
+<tr><td><code>scripts/serve_with_unitrace.py</code></td><td>vLLM server wrapper that adds <code>/start_profile</code> + <code>/stop_profile</code> driven by <code>__itt_resume</code> / <code>__itt_pause</code>; uses the <code>run_server(...)</code> direct-invocation path (NOT <code>runpy</code>).</td></tr>
+<tr><td><code>scripts/run_unitrace_vllm.sh</code></td><td>Launcher that wraps the wrapper in <code>unitrace --start-paused</code>; bakes in env vars and CLI flags; <code>trap report_on_exit EXIT</code> auto-runs <code>generate_report.py</code>.</td></tr>
+<tr><td><code>scripts/generate_report.py</code></td><td>Standalone report builder: parses <code>python.*.json</code>, segments iterations, ranks kernels, writes a self-contained <code>unitrace_vllm_report.html</code> (CSS + SVG plots inline).</td></tr>
+</tbody>
+</table>
+
+<h3>5.1 Default env baked into the launcher</h3>
+<pre><code>HF_HOME=/hf_cache
+SYCL_UR_USE_LEVEL_ZERO_V2=0
+TORCH_LLM_ALLREDUCE=1
+VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+VLLM_USE_V1=1
+VLLM_WORKER_MULTIPROC_METHOD=spawn</code></pre>
+
+<p>Override via env: <code>MODEL=… PORT=… bash run_unitrace_vllm.sh</code>.
+Default vLLM flags: <code>--block-size 64 --dtype float16 --enforce-eager</code>.</p>
+
+<h3>5.2 Skipping auto-report</h3>
+<pre><code>UNITRACE_SKIP_REPORT=1 bash run_unitrace_vllm.sh</code></pre>
+
+<h3>5.3 Re-generating the report against an old run</h3>
+<pre><code>python3 scripts/generate_report.py /path/to/unitrace_results/&lt;timestamp&gt;_&lt;model&gt;/</code></pre>
+</section>
+
+<!-- ===================== RESULTS ===================== -->
+<section id="results">
+<h2>6. Results &amp; Hotspots</h2>
+
+<h3>6.1 Files produced</h3>
+<pre><code>unitrace_results/&lt;timestamp&gt;_&lt;model&gt;/
+├── python.&lt;api_server_pid&gt;.json     # mostly idle FastAPI / asyncio
+├── python.&lt;engine_core_pid&gt;.json    # ← contains the GPU kernels
+├── sh.&lt;launcher_pid&gt;.json           # tiny, the bash wrapper
+├── unitrace_vllm_report.html        # auto-generated by EXIT trap
+└── roi_gate                         # absent if /stop_profile was called</code></pre>
+
+<h3>6.2 Device-timing summary (when <code>-d</code> is set)</h3>
+<pre><code>=== Device Timing Summary ===
+
+                Total Execution Time (ns):          475123456
+
+                Kernel,                Calls,    Time (ns), Time (%), Average (ns), Min (ns), Max (ns)
+                ---,                       ---,         ---,      ---,          ---,      ---,     ---
+                ...</code></pre>
+<p>A summary printed for every traced process — interpret only the <strong>EngineCore</strong> one for GPU timing.</p>
+
+<h3>6.3 Trace event categories</h3>
+<table>
+<thead><tr><th>Category</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>gpu_op</code></td><td>Level Zero kernel executions on the device. Names: <code>submit</code>, demangled SYCL kernel, or L0 entry-point.</td></tr>
+<tr><td><code>cpu_op</code></td><td>Host-side L0/SYCL/UR API calls (<code>urKernelSetArgValue</code>, <code>zeCommandListAppendLaunchKernel</code>, …). High frequency is normal.</td></tr>
+<tr><td><code>Flow_H2D_*</code></td><td>Host → device copy correlation.</td></tr>
+<tr><td><code>Flow_D2H_*</code></td><td>Device → host copy correlation.</td></tr>
+<tr><td>ITT track (with <code>--chrome-itt-logging</code>)</td><td>Resume/pause markers and explicit ITT regions.</td></tr>
+</tbody>
+</table>
+
+<h3>6.4 Quick health check</h3>
+<pre><code>python3 - &lt;&lt;'PY'
+import json, collections, glob, os
+d = sorted(glob.glob("unitrace_results/*/"))[-1]
+for p in glob.glob(os.path.join(d, "python.*.json")):
+    data = json.load(open(p))
+    ev = data.get("traceEvents", data) if isinstance(data, dict) else data
+    cats = collections.Counter(e.get("cat","-") for e in ev)
+    gpu = [e for e in ev if e.get("cat")=="gpu_op" and e.get("ph")=="X"]
+    span = 0
+    if gpu:
+        ts = sorted(e["ts"] for e in gpu if "ts" in e)
+        span = (ts[-1]-ts[0])/1e6 if ts else 0
+    print(f"{os.path.basename(p)}: {len(ev)} events, gpu={len(gpu)}, span={span:.2f}s")
+PY</code></pre>
+
+<p>Healthy output for a single short chat completion (tight ROI):</p>
+<pre><code>python.7954.json: 200 events,  gpu=0,    span=0.00s   # API server, no kernels
+python.8236.json: 29064 events, gpu=1164, span=0.48s  # EngineCore — kernels in tight window</code></pre>
+
+<h3>6.5 What to look at first</h3>
+<ol>
+  <li><strong>Where is GPU time spent?</strong> Read the device-timing summary — top kernels by % time tell you what to optimize.</li>
+  <li><strong>Are kernels back-to-back, or are there gaps?</strong> Open the EngineCore JSON in Perfetto and zoom in. Visible gaps = host-bound overhead (sampling, scheduling, sync).</li>
+  <li><strong>Unexpected H2D / D2H copies?</strong> Steady-state decode should have almost none.</li>
+  <li><strong>Per-iteration shape</strong> — find one full <code>execute_model</code> cycle (between two ITT resume markers if <code>--chrome-itt-logging</code> is on); that kernel sequence is your inner loop.</li>
+</ol>
+
+<h3>6.6 Loading the trace</h3>
+<table>
+<thead><tr><th>Tool</th><th>How</th></tr></thead>
+<tbody>
+<tr><td><code>chrome://tracing</code></td><td>Load → pick one <code>python.*.json</code>. Multiple files = multiple loads.</td></tr>
+<tr><td>Perfetto (recommended)</td><td><a href="https://ui.perfetto.dev">ui.perfetto.dev</a> → Open trace file. Better Flow-event UI than Chrome.</td></tr>
+<tr><td>Multi-process merged view</td><td>Concatenate <code>traceEvents</code> arrays manually; PIDs disambiguate.</td></tr>
+<tr><td>pti-gpu summary scripts</td><td><code>pti-gpu/tools/unitrace/scripts/summary/&lt;script&gt;.py path/to/python.&lt;pid&gt;.json</code></td></tr>
+</tbody>
+</table>
+
+<pre><code>import json, glob
+out = {"traceEvents": []}
+for p in sorted(glob.glob("unitrace_results/*/python.*.json"))[-2:]:
+    out["traceEvents"].extend(json.load(open(p))["traceEvents"])
+json.dump(out, open("merged.json","w"))</code></pre>
+
+<h3>6.7 Trace size warnings</h3>
+<p><code>--chrome-kernel-logging</code> + <code>--chrome-sycl-logging</code> for a 30 s benchmark of a 7B model
+can hit hundreds of MB. Chrome refuses traces over ~256 MB; Perfetto handles &gt; 1 GB but slowly.
+Mitigations: tighten ROI, drop <code>--chrome-sycl-logging</code> if only kernel timing matters, use
+<code>--include-kernels=&lt;substr-list&gt;</code> (Level Zero only) to filter.</p>
+
+<div class="callout warn">
+<div class="title">Trace files arrive AFTER the process exits</div>
+unitrace writes JSONs during teardown. <code>kill -9</code> the launcher → truncated/missing JSONs.
+Always Ctrl-C (one is enough; give a few seconds to flush). The device-timing summary printing to stdout
+is the sign that teardown completed.
+</div>
+</section>
+
+<!-- ===================== TROUBLESHOOTING ===================== -->
+<section id="troubleshoot">
+<h2>7. Troubleshooting</h2>
+
+<table>
+<thead><tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr></thead>
+<tbody>
+<tr><td><code>ITT available: False</code> in launcher log</td><td>Wrapper opened <code>libittnotify.so</code> but pti-gpu builds it as <code>.a</code> only</td><td>Wrapper falls back to <code>libunitrace_tool.so</code>; verify <code>UNITRACE_TOOL_LIB</code> env or default path</td></tr>
+<tr><td>Server starts but <code>/start_profile</code> 404</td><td><code>runpy.run_module(..., __main__)</code> re-imported <code>api_server</code> fresh, dropping the <code>build_app</code> monkey-patch</td><td>Use the <code>run_server(...)</code> direct-invocation path in this skill's wrapper, NOT <code>runpy</code></td></tr>
+<tr><td><code>Failed to launch target application: --</code></td><td><code>unitrace -- python …</code> rejects <code>--</code></td><td>Drop the <code>--</code>: <code>unitrace &lt;flags&gt; python …</code></td></tr>
+<tr><td>GPU span = entire server lifetime</td><td>ROI gate never closed; client crashed mid-run</td><td>Worker patch reads <code>roi_gate</code> every step → leftover gate files cause unbounded coverage. Delete stale <code>roi_gate</code> between runs (the launcher puts them in <code>$RESULT_DIR</code>)</td></tr>
+<tr><td><code>_patch_build_app.&lt;locals&gt;.wrapped() takes 1 positional argument but 2 were given</code></td><td><code>build_app</code> signature widened</td><td>Wrapper uses <code>*args, **kwargs</code> — keep it that way</td></tr>
+<tr><td><code>llvm-foreach SEGV</code> inside SYCL JIT</td><td><code>torch.compile</code> interaction with intel/vllm-xpu</td><td>Always launch with <code>--enforce-eager</code> (saved feedback: <code>feedback_vllm_xpu_enforce_eager</code>)</td></tr>
+<tr><td><code>gpu=0</code> in every JSON</td><td>Build missing <code>BUILD_WITH_L0=1</code> (default on), or workload didn't exercise GPU</td><td>Verify build flags + run a tiny standalone XPU op to confirm Level Zero works</td></tr>
+<tr><td>EngineCore subprocess wasn't traced</td><td><code>--follow-child-process 0</code> set</td><td>Default is <code>1</code>; verify your unitrace flags didn't override</td></tr>
+</tbody>
+</table>
+
+<h3>7.1 Verifying ITT is wired up</h3>
+<p>The launcher prints:</p>
+<pre><code>2026-06-10 12:15:39 [unitrace.vllm] ITT available: True</code></pre>
+<p>You want <strong>True</strong> in <em>both</em> the API-server process AND the
+<code>EngineCore_DP0</code> subprocess. If only one says True, the worker process didn't inherit the
+injected lib.</p>
+
+<h3>7.2 Build patch reapplication</h3>
+<p>The struct-cast patch is not yet upstream. After <code>git pull</code>, re-apply it or check the
+upstream <a href="https://github.com/intel/pti-gpu">intel/pti-gpu</a> repo.</p>
+</section>
+
+<!-- ===================== BMG OPTION MATRIX ===================== -->
+<section id="bmg-matrix">
+<h2>8. BMG Option Support Matrix</h2>
+<p>
+Empirical results from exercising every flag listed in the upstream
+<a href="https://github.com/intel/pti-gpu/tree/master/tools/unitrace#run">README "Run" section</a>
+against vLLM serving <code>meta-llama/Llama-3.1-8B-Instruct</code> on
+Intel Graphics <code>[0xe223]</code> (BMG / Xe2), driven by curl through the ITT-gated
+<code>/start_profile</code> → <code>/stop_profile</code> ROI.
+Tested with both <code>intel/vllm:0.14.1-xpu</code> and <code>intel/vllm:0.17.0-xpu</code> — results identical.
+</p>
+
+<h3>8.1 Works cleanly</h3>
+<table>
+<thead><tr><th>Option</th><th>Family</th><th>Notes on BMG3</th></tr></thead>
+<tbody>
+<tr><td><code>--version</code></td><td>info</td><td>Reports <code>2.3.0</code>.</td></tr>
+<tr><td><code>--help</code></td><td>info</td><td>57-line option listing matches README.</td></tr>
+<tr><td><code>--device-list</code></td><td>info</td><td><code>Device #0: [0:17:0.0] Intel(R) Graphics [0xe223]</code>.</td></tr>
+<tr><td><code>-c / --call-logging</code></td><td>host report</td><td>Captured in R1 kitchen-sink; appears in API-timing table.</td></tr>
+<tr><td><code>-h / --host-timing</code></td><td>host report</td><td>Produces <code>=== API Timing Summary ===</code> with per-L0-function breakdown.</td></tr>
+<tr><td><code>-d / --device-timing</code></td><td>device report</td><td>Produces <code>=== Device Timing Summary ===</code> with per-kernel breakdown.</td></tr>
+<tr><td><code>-s / --kernel-submission</code></td><td>device report</td><td>Produces <code>=== Kernel Submission Summary ===</code>; on BMG3 <code>Append=0</code> (immediate cmd-lists), <code>Submit/Execute</code> populated.</td></tr>
+<tr><td><code>-t / --device-timeline</code></td><td>device</td><td>Implicit in Chrome trace under <code>--chrome-kernel-logging</code> / <code>--chrome-device-logging</code>.</td></tr>
+<tr><td><code>--chrome-call-logging</code></td><td>chrome</td><td>Adds L0/OpenCL host-call rows.</td></tr>
+<tr><td><code>--chrome-kernel-logging</code></td><td>chrome</td><td>Default for GPU work; needed for any <code>gpu_op</code> events.</td></tr>
+<tr><td><code>--chrome-device-logging</code></td><td>chrome</td><td>Device-side only; smaller trace.</td></tr>
+<tr><td><code>--chrome-itt-logging</code></td><td>chrome</td><td>Surfaces <code>/start_profile</code> / <code>/stop_profile</code> markers — essential for ROI verification.</td></tr>
+<tr><td><code>--chrome-sycl-logging</code></td><td>chrome</td><td>Adds SYCL runtime + UR plugin events between launches.</td></tr>
+<tr><td><code>--chrome-dnn-logging</code></td><td>chrome</td><td>oneDNN primitives appear when used by the workload.</td></tr>
+<tr><td><code>--chrome-no-thread-on-device</code></td><td>chrome</td><td>Collapses per-thread tids on device track (verified: 2 tids vs many).</td></tr>
+<tr><td><code>--chrome-no-engine-on-device</code></td><td>chrome</td><td>Drops per-L0-engine breakdown; pairs with above to shrink trace.</td></tr>
+<tr><td><code>--chrome-event-buffer-size N</code></td><td>chrome</td><td>Tested at 1 000 000; trace bounded as expected.</td></tr>
+<tr><td><code>--verbose / -v</code></td><td>output</td><td>Populates the <code>=== Kernel Properties ===</code> table (SIMD, args, SLM, spill).</td></tr>
+<tr><td><code>--demangle</code></td><td>output</td><td>Accepted; vLLM is L0-only so no OpenCL kernel names to demangle.</td></tr>
+<tr><td><code>--separate-tiles</code></td><td>output</td><td>No-op on BMG3 (single tile); does not error.</td></tr>
+<tr><td><code>--tid / --pid</code></td><td>output</td><td>Threading/PID columns added to host-API rows in trace.</td></tr>
+<tr><td><code>--output / -o NAME</code></td><td>output</td><td>Renames per-PID files (<code>NAME.&lt;pid&gt;</code>) instead of <code>python3.&lt;pid&gt;.json</code>.</td></tr>
+<tr><td><code>--output-dir-path PATH</code></td><td>output</td><td>All artifacts land in PATH (used by <code>run_unitrace_vllm.sh</code>).</td></tr>
+<tr><td><code>--start-paused</code></td><td>ROI</td><td>Foundation of the ROI flow; pairs with ITT API.</td></tr>
+<tr><td><code>--conditional-collection</code></td><td>ROI (deprecated)</td><td>Alias for <code>--start-paused</code>; unitrace 2.3.0 still accepts it, no warning printed.</td></tr>
+<tr><td><code>--follow-child-process 0/1</code></td><td>process</td><td>Default <code>1</code> needed to trace EngineCore subprocess (vLLM v1).</td></tr>
+<tr><td><code>--session NAME</code></td><td>session control</td><td>Out-of-app control: <code>unitrace --resume/--pause/--stop NAME</code> from a separate shell — all three return <code>[INFO] Session NAME is resumed/paused/stopped</code>.</td></tr>
+<tr><td><code>--include-kernels &lt;list&gt;</code></td><td>kernel filter</td><td>Verified: <code>--include-kernels gemm_kernel</code> narrowed trace to only <code>gemm_kernel*</code> ops.</td></tr>
+<tr><td><code>--exclude-kernels &lt;list&gt;</code></td><td>kernel filter</td><td>Mirror of include; same code path.</td></tr>
+<tr><td><code>--include-kernels-file FILE</code></td><td>kernel filter</td><td>Reads one substring per line.</td></tr>
+<tr><td><code>--exclude-kernels-file FILE</code></td><td>kernel filter</td><td>Verified: with <code>gemm_kernel\nrms_norm</code> file, both kernels absent from trace.</td></tr>
+<tr><td><code>--opencl</code></td><td>backend</td><td>Adds OpenCL tracing on top of L0; no OpenCL ops in vLLM but flag does not break L0 trace.</td></tr>
+<tr><td><code>--metric-list</code></td><td>info</td><td>Works, but BMG3 only exposes one group (see "Partial" below).</td></tr>
+</tbody>
+</table>
+
+<h3>8.2 Partial / no-data on BMG3</h3>
+<table>
+<thead><tr><th>Option</th><th>Status</th><th>What actually happens on BMG3</th></tr></thead>
+<tbody>
+<tr><td><code>--metric-list</code></td><td><span class="badge warn">Partial</span></td><td>Only <code>EuStallSampling</code> group exposed — no <code>ComputeBasic</code>, <code>ComputeExtended</code>, <code>VmeBasic</code>, etc. Any flag depending on those groups will fail.</td></tr>
+<tr><td><code>--metric-sampling / -k --group EuStallSampling --sampling-interval N</code></td><td><span class="badge warn">Partial</span></td><td>Server runs and chat completes, but Chrome traces emerge as 136-byte headers (no events). Repeated <code>[INFO] session unitrace_metric_sampling_control data already mapped</code> + leaves <code>/tmp/tmpdir.*</code> behind. Sampling backing store collides on the V1 EngineCore fork.</td></tr>
+<tr><td><code>--stall-sampling</code></td><td><span class="badge warn">Partial</span></td><td>Same failure mode as <code>--metric-sampling</code> under the V1-spawn flow — empty traces + leftover tmpdir. Worked on standalone GEMM samples in earlier validation, so the breakage is the EngineCore spawn pattern, not the GPU.</td></tr>
+<tr><td><code>--ccl-summary-report / -r</code></td><td><span class="badge warn">No data</span></td><td>Trace OK; no CCL summary table emitted because single-GPU TP=1 has no allreduce inside ROI. Re-run with TP &gt; 1 or <code>vllm bench serve</code> to populate.</td></tr>
+<tr><td><code>--chrome-ccl-logging</code></td><td><span class="badge warn">No data</span></td><td>Same — flag accepted, no events because no CCL collectives executed.</td></tr>
+<tr><td><code>--chrome-mpi-logging</code></td><td><span class="badge warn">No data</span></td><td>Single-rank run; no MPI calls to trace.</td></tr>
+</tbody>
+</table>
+
+<h3>8.3 Fails on BMG3</h3>
+<table>
+<thead><tr><th>Option</th><th>Status</th><th>Reason</th></tr></thead>
+<tbody>
+<tr><td><code>--metric-query / -q --group EuStallSampling</code></td><td><span class="badge" style="color:var(--err);border-color:rgba(248,81,73,.4);">Fail</span></td><td><code>[ERROR] Unable to get metric group EuStallSampling. Please make sure the metric group is valid and supported</code>. The query path (per-kernel instance) is not implemented for the only group BMG3 exposes; <code>ComputeBasic</code> would work elsewhere but is absent here.</td></tr>
+<tr><td><code>--metric-query --group ComputeBasic</code></td><td><span class="badge" style="color:var(--err);border-color:rgba(248,81,73,.4);">Fail</span></td><td>Group not present in <code>--metric-list</code>; rejected before any kernel runs.</td></tr>
+</tbody>
+</table>
+
+<h3>8.4 Not exercised on BMG3</h3>
+<table>
+<thead><tr><th>Option</th><th>Reason skipped</th></tr></thead>
+<tbody>
+<tr><td><code>--chrome-kmd-logging &lt;script&gt;</code></td><td>Needs a kernel-driver activity script and root-level perf access — orthogonal to the README "Run" command-line surface.</td></tr>
+<tr><td><code>--ranks-to-sample &lt;ranks&gt;</code></td><td>Single-rank vLLM (no <code>mpirun</code>); flag is a no-op without an MPI launcher.</td></tr>
+<tr><td><code>--devices-to-sample &lt;devices&gt;</code></td><td>Only one visible device (<code>0:17:0.0</code>); nothing to filter to. Tested on multi-GPU host separately.</td></tr>
+<tr><td><code>--teardown-on-signal &lt;signum&gt;</code></td><td>README warns this changes application behavior; deferred — not safe to test on a long-lived vLLM without a controlled crash setup.</td></tr>
+</tbody>
+</table>
+
+<div class="callout warn">
+<div class="title">BMG3 takeaway</div>
+<ol>
+  <li>For per-kernel GPU performance counters on BMG3, <strong>none</strong> of the metric-query / metric-sampling / stall-sampling paths work cleanly under vLLM v1. Use VTune GPU-Hotspots (see the companion <code>vtune-vllm-profiling</code> skill) instead.</li>
+  <li>Chrome-trace logging, host/device timing tables, kernel filters, ROI control (<code>--start-paused</code> + ITT + <code>--session</code>) all work end-to-end.</li>
+  <li>The deprecated <code>--conditional-collection</code> alias still works silently — but prefer <code>--start-paused</code> for clarity.</li>
+</ol>
+</div>
+</section>
+
+<!-- ===================== CONCLUSION ===================== -->
+<section id="conclusion">
+<h2>9. Conclusion</h2>
+
+<div class="callout ok">
+<div class="title">Key takeaways</div>
+<ol>
+  <li><strong>unitrace + ITT + <code>--start-paused</code> ≡ tight ROI.</strong> Without all three, you're back to a whole-lifetime trace.</li>
+  <li><strong>Symbol resolution model:</strong> ITT comes from <code>libunitrace_tool.so</code>, not a system <code>libittnotify.so</code> — the container doesn't ship one.</li>
+  <li><strong>Cross-process glue:</strong> the gate file is essential for v1 — ITT calls in the API parent don't reach the EngineCore subprocess.</li>
+  <li><strong>BMG/Xe2 build patch:</strong> apply the templated <code>to_hex_value_</code> helper to <code>gen_tracing_callbacks.py</code> until upstream merges a fix.</li>
+  <li><strong>Always Ctrl-C, never SIGKILL.</strong> unitrace flushes JSONs at teardown; <code>kill -9</code> truncates them.</li>
+  <li><strong>Pick the smallest preset that answers your question.</strong> <code>lite</code> for first pass, <code>call</code>/<code>ccl</code>/<code>dnn</code> for targeted investigations, <code>full</code> only when you need everything.</li>
+</ol>
+</div>
+
+<h3>9.1 Cross-skill notes</h3>
+<ul>
+  <li>Same ROI pattern as the <strong>vtune</strong> skill (<code>serve_with_vtune.py</code> + <code>vtune_itt.py</code>) — different collector backend.</li>
+  <li>Vendor-agnostic alternative: the <strong>pytorch-profiler</strong> skill uses vLLM's <code>--profiler-config</code>
+      (or <code>VLLM_TORCH_PROFILER_DIR</code> on &le; 0.14) + Perfetto-readable <code>.pt.trace.json</code> — no Intel-specific build, but no Level Zero / SYCL / oneCCL detail.</li>
+</ul>
+
+<h3>9.2 Reference files</h3>
+<table>
+<thead><tr><th>File</th><th>Contents</th></tr></thead>
+<tbody>
+<tr><td><code>SKILL.md</code></td><td>Overview, build, launch, ROI contract, preset matrix, pitfalls.</td></tr>
+<tr><td><code>scripts/serve_with_unitrace.py</code></td><td>vLLM wrapper with ITT-driven endpoints (uses <code>run_server(...)</code>, not <code>runpy</code>).</td></tr>
+<tr><td><code>scripts/run_unitrace_vllm.sh</code></td><td>unitrace launcher (auto-runs <code>generate_report.py</code> on exit).</td></tr>
+<tr><td><code>scripts/generate_report.py</code></td><td>Builds <code>unitrace_vllm_report.html</code> for a given result dir.</td></tr>
+<tr><td><code>docs/build-troubleshooting.md</code></td><td>Generator patch details, NFS clone issues, clock skew warnings.</td></tr>
+<tr><td><code>docs/itt-resolution.md</code></td><td>Why ITT comes from <code>libunitrace_tool.so</code>, RTLD_GLOBAL strategy.</td></tr>
+<tr><td><code>docs/output-and-analysis.md</code></td><td>Chrome trace JSON layout, device-timing summary, healthy heuristics, Perfetto loading.</td></tr>
+</tbody>
+</table>
+
+<h3>9.3 Validated environment</h3>
+<ul>
+  <li>Host: <code>gnrsp-bmg3.iind.intel.com</code></li>
+  <li>Containers: <code>unitrace_vllm_test_vasu</code> on <code>intel/vllm:0.17.0-xpu</code>; <code>skill-test-vasu</code> on <code>intel/vllm:0.21.0-ubuntu24.04</code>.</li>
+  <li>unitrace 2.3.0 at <code>/data/workspace/vasudha/pti-gpu/tools/unitrace/build</code> — generator patched for newer L0 IPC handle struct.</li>
+  <li>Shutdown rule: SIGINT vLLM (not unitrace) so unitrace observes child exit and flushes traces + metrics.</li>
+</ul>
+</section>
+
+<footer>
+Generated from <code>vllm-xpu-profiling-toolkit/unitrace/</code> — SKILL.md + docs/build-troubleshooting.md + docs/itt-resolution.md + docs/output-and-analysis.md.
+Targets Intel Xe / Xe2 (BMG) GPUs running vLLM v1 (0.14 / 0.17 / 0.21); pti-gpu unitrace as the GPU tracer.
+Source: <a href="https://github.com/Vasud-ha/vllm-xpu-profiling-toolkit">github.com/Vasud-ha/vllm-xpu-profiling-toolkit</a>.
+</footer>
+
+</main>
+</div>
+</body>
+</html>
