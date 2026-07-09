@@ -576,6 +576,32 @@ PY</code></pre>
   <li><strong><code>--enforce-eager</code> is required</strong> on <code>intel/vllm-xpu</code> to avoid the llvm-foreach SEGV in SYCL JIT and to get clearer kernel names.</li>
   <li><strong>Phase ratio</strong>: at BS=1, <code>prefill_GPU_time : decode_GPU_time_per_token ≈ seq_len / 8</code>. A 512-token prompt with 256-token response → decode dominates ≈ 99 % of GPU time. Profile prefill and decode in <em>separate</em> runs for clean attribution.</li>
 </ul>
+
+<h3>7.5 Opening the result in the VTune viewer</h3>
+<p>A finalized result-dir opens in three ways — on the collection host, over SSH, or on your local workstation after copying it off. Pick whichever fits your setup:</p>
+
+<h4>On the collection host (terminal)</h4>
+<pre><code>source /opt/intel/oneapi/setvars.sh                                       # puts vtune-gui on PATH
+vtune-gui ./vtune_results/&lt;timestamp&gt;_&lt;phase&gt;                             # opens the result dir in the VTune GUI</code></pre>
+
+<h4>On a headless / SSH host</h4>
+<pre><code>ssh -X &lt;user&gt;@&lt;host&gt;                                                      # or -Y for trusted forwarding
+source /opt/intel/oneapi/setvars.sh &amp;&amp; vtune-gui ./vtune_results/&lt;timestamp&gt;_&lt;phase&gt;</code></pre>
+
+<h4>Locally — copy the dir off first</h4>
+<pre><code>scp -r &lt;user&gt;@&lt;host&gt;:/path/to/vtune_results/&lt;timestamp&gt;_&lt;phase&gt; ~/vtune_local/   # copy the whole result dir
+vtune-gui ~/vtune_local/&lt;timestamp&gt;_&lt;phase&gt;                                   # open it in the local VTune GUI</code></pre>
+
+<h4>Locally — with the VTune application (GUI, no terminal)</h4>
+<ol>
+  <li>Launch <strong>Intel VTune Profiler</strong> from your Start menu / Applications / Launchpad (or run <code>vtune-gui</code> from a terminal that has <code>setvars.sh</code> sourced).</li>
+  <li>In the VTune window, click <strong>Open Result</strong> (or <strong>File → Open → Result…</strong>), navigate to the copied result dir, and select the <code>&lt;timestamp&gt;_&lt;phase&gt;.vtune</code> file inside it — VTune loads the Summary tab automatically.</li>
+</ol>
+
+<div class="callout warn">
+<div class="title">Copy the whole directory, not individual files</div>
+A result dir needs <code>config.cfg</code>, <code>data.0/</code>, <code>log/</code>, and <code>runss/</code> together. Copying only the <code>.vtune</code> file will fail to open. On the local machine, VTune Profiler must be installed and its major version must be &ge; the collector's (e.g. open a 2025.x result with 2025.x or 2026.0, not 2024.x).
+</div>
 </section>
 
 <!-- ===================== TROUBLESHOOTING ===================== -->
