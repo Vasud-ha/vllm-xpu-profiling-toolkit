@@ -594,12 +594,32 @@ Tested with both <code>intel/vllm:0.14.1-xpu</code> and <code>intel/vllm:0.17.0-
 </tbody>
 </table>
 
-<h3>8.3 Fails on BMG3</h3>
+<h3>8.3 Metric-query — version-dependent on BMG3</h3>
+<p>
+<code>--metric-query</code> support depends entirely on which container / vLLM image you run.
+The older <code>intel/vllm:0.17.0-xpu</code> stack (container <code>unitrace_vllm_test_vasu</code>)
+exposes only <code>EuStallSampling</code> via <code>--metric-list</code>, so every query fails.
+The newer <code>intel/vllm:0.21.0-ubuntu24.04</code> stack (container <code>skill-test-vasu</code>)
+exposes 13 metric groups including <code>ComputeBasic</code>, and <code>--metric-query</code>
+runs end-to-end on the vLLM v1 EngineCore.
+</p>
+
+<h4>Fails: intel/vllm:0.17.0-xpu (unitrace_vllm_test_vasu, unitrace 2.3.0)</h4>
 <table>
 <thead><tr><th>Option</th><th>Status</th><th>Reason</th></tr></thead>
 <tbody>
-<tr><td><code>--metric-query / -q --group EuStallSampling</code></td><td><span class="badge" style="color:var(--err);border-color:rgba(248,81,73,.4);">Fail</span></td><td><code>[ERROR] Unable to get metric group EuStallSampling. Please make sure the metric group is valid and supported</code>. The query path (per-kernel instance) is not implemented for the only group BMG3 exposes; <code>ComputeBasic</code> would work elsewhere but is absent here.</td></tr>
-<tr><td><code>--metric-query --group ComputeBasic</code></td><td><span class="badge" style="color:var(--err);border-color:rgba(248,81,73,.4);">Fail</span></td><td>Group not present in <code>--metric-list</code>; rejected before any kernel runs.</td></tr>
+<tr><td><code>--metric-query / -q --group EuStallSampling</code></td><td><span class="badge" style="color:var(--err);border-color:rgba(248,81,73,.4);">Fail</span></td><td><code>[ERROR] Unable to get metric group EuStallSampling. Please make sure the metric group is valid and supported</code>. The query path (per-kernel instance) is not implemented for the only group this image exposes; <code>ComputeBasic</code> would work elsewhere but is absent here.</td></tr>
+<tr><td><code>--metric-query --group ComputeBasic</code></td><td><span class="badge" style="color:var(--err);border-color:rgba(248,81,73,.4);">Fail</span></td><td>Group not present in <code>--metric-list</code> on this image; rejected before any kernel runs.</td></tr>
+</tbody>
+</table>
+
+<h4>Passes: intel/vllm:0.21.0-ubuntu24.04 (skill-test-vasu, unitrace 2.3.0)</h4>
+<table>
+<thead><tr><th>Option</th><th>Status</th><th>Result</th></tr></thead>
+<tbody>
+<tr><td><code>--metric-query --group ComputeBasic</code></td><td><span class="badge success">Pass</span></td><td>Runs on the spawned EngineCore, writes per-kernel CSV plus a Chrome-trace JSON. Verified in <code>verification_log_vllm_0.21.md</code> (session 3) — this image exposes 13 metric groups via <code>--metric-list</code> (<code>ComputeBasic</code>, <code>ComputeExtended</code>, <code>DeviceCacheProfile</code>, <code>MemoryProfile</code>, <code>VectorEngineProfile</code>, <code>VectorEngineStalls</code>, …).</td></tr>
+<tr><td><code>--metric-query --group DeviceCacheProfile / MemoryProfile / VectorEngineProfile / VectorEngineStalls</code></td><td><span class="badge success">Pass</span></td><td>Same code path as <code>ComputeBasic</code>; the four groups captured in <code>~/unitrace_captures_20260706/</code> all produced valid per-kernel CSV and non-empty Chrome traces.</td></tr>
+<tr><td><code>--stall-sampling</code></td><td><span class="badge warn">Still fails</span></td><td>Even on 0.21, the L0 stall session doesn't propagate to the spawned EngineCore — same empty-trace symptom as §8.2. Use <code>--metric-query --group VectorEngineStalls</code> instead for stall analysis on BMG3.</td></tr>
 </tbody>
 </table>
 
@@ -617,8 +637,13 @@ Tested with both <code>intel/vllm:0.14.1-xpu</code> and <code>intel/vllm:0.17.0-
 <div class="callout warn">
 <div class="title">BMG3 takeaway</div>
 <ol>
-  <li>For per-kernel GPU performance counters on BMG3, <strong>none</strong> of the metric-query / metric-sampling / stall-sampling paths work cleanly under vLLM v1. Use VTune GPU-Hotspots (see the companion <code>vtune-vllm-profiling</code> skill) instead.</li>
-  <li>Chrome-trace logging, host/device timing tables, kernel filters, ROI control (<code>--start-paused</code> + ITT + <code>--session</code>) all work end-to-end.</li>
+  <li>For per-kernel GPU performance counters on BMG3, the story depends on the image:
+    <ul>
+      <li><strong><code>intel/vllm:0.17.0-xpu</code></strong> — <code>--metric-query</code> fails (only <code>EuStallSampling</code> exposed, and the query path can't consume it). Fall back to VTune GPU-Hotspots (see the companion <code>vtune</code> skill).</li>
+      <li><strong><code>intel/vllm:0.21.0-ubuntu24.04</code></strong> — <code>--metric-query</code> works with 13 groups incl. <code>ComputeBasic</code>, <code>DeviceCacheProfile</code>, <code>VectorEngineStalls</code>. Prefer this over <code>--stall-sampling</code> (still broken under EngineCore spawn).</li>
+    </ul>
+  </li>
+  <li>Chrome-trace logging, host/device timing tables, kernel filters, ROI control (<code>--start-paused</code> + ITT + <code>--session</code>) all work end-to-end on both images.</li>
   <li>The deprecated <code>--conditional-collection</code> alias still works silently — but prefer <code>--start-paused</code> for clarity.</li>
 </ol>
 </div>
